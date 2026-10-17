@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_map/flutter_map.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 
 void main() {
@@ -42,9 +43,74 @@ class _MapScreenState extends State<MapScreen> {
   final MapController _controller = MapController();
   static const LatLng _start = LatLng(24.7136, 46.6753);
 
+  LatLng? _myLocation;
+  bool _locating = false;
+
   void _zoom(double delta) {
     final cam = _controller.camera;
     _controller.move(cam.center, cam.zoom + delta);
+  }
+
+  void _msg(String text, {bool settings = false}) {
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(text),
+        action: settings
+            ? SnackBarAction(
+                label: 'الإعدادات',
+                onPressed: () {
+                  Geolocator.openAppSettings();
+                },
+              )
+            : null,
+      ),
+    );
+  }
+
+  Future<void> _locateMe() async {
+    if (_locating) return;
+    setState(() => _locating = true);
+    try {
+      final enabled = await Geolocator.isLocationServiceEnabled();
+      if (!enabled) {
+        _msg('خدمة الموقع (GPS) مغلقة. فعّلها من إعدادات الهاتف ثم حاول مرة أخرى.');
+        return;
+      }
+
+      var permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      if (permission == LocationPermission.denied) {
+        _msg('لم يتم السماح بالوصول إلى الموقع، لذلك لا يمكن تحديد موقعك.');
+        return;
+      }
+      if (permission == LocationPermission.deniedForever) {
+        _msg(
+          'تم رفض إذن الموقع بشكل دائم. فعّله من إعدادات التطبيق.',
+          settings: true,
+        );
+        return;
+      }
+
+      final position = await Geolocator.getCurrentPosition(
+        locationSettings: LocationSettings(
+          accuracy: LocationAccuracy.high,
+          timeLimit: const Duration(seconds: 20),
+        ),
+      );
+      final here = LatLng(position.latitude, position.longitude);
+      if (!mounted) return;
+      setState(() => _myLocation = here);
+      _controller.move(here, 16);
+    } catch (e) {
+      _msg('تعذّر تحديد موقعك. تأكد من تفعيل GPS وحاول مرة أخرى.');
+    } finally {
+      if (mounted) setState(() => _locating = false);
+    }
   }
 
   @override
@@ -69,6 +135,26 @@ class _MapScreenState extends State<MapScreen> {
                 urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
                 userAgentPackageName: 'com.dalilik.dalilik',
               ),
+              if (_myLocation != null)
+                MarkerLayer(
+                  markers: [
+                    Marker(
+                      point: _myLocation!,
+                      width: 24,
+                      height: 24,
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: Colors.blue,
+                          shape: BoxShape.circle,
+                          border: Border.all(color: Colors.white, width: 3),
+                          boxShadow: const [
+                            BoxShadow(blurRadius: 6, color: Colors.black38),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
               RichAttributionWidget(
                 attributions: [
                   TextSourceAttribution('© مساهمو OpenStreetMap'),
@@ -93,6 +179,21 @@ class _MapScreenState extends State<MapScreen> {
                   child: const Icon(Icons.remove),
                 ),
               ],
+            ),
+          ),
+          Positioned(
+            right: 16,
+            bottom: 64,
+            child: FloatingActionButton(
+              heroTag: 'locate',
+              onPressed: _locateMe,
+              child: _locating
+                  ? const SizedBox(
+                      width: 24,
+                      height: 24,
+                      child: CircularProgressIndicator(strokeWidth: 3),
+                    )
+                  : const Icon(Icons.my_location),
             ),
           ),
         ],
