@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -67,8 +68,13 @@ class _MapScreenState extends State<MapScreen> {
   double? _distanceMeters;
   double? _durationSeconds;
 
+  bool _navigating = false;
+  StreamSubscription<Position>? _positionSub;
+  double? _speedKmh;
+
   @override
   void dispose() {
+    _positionSub?.cancel();
     _searchController.dispose();
     super.dispose();
   }
@@ -220,10 +226,11 @@ class _MapScreenState extends State<MapScreen> {
       _results = [];
       _resetRoute();
     });
-    _controller.move(place.point, 15);
+    _controller.move(place.point, 17);
   }
 
   void _setDestinationFromMap(LatLng point) {
+    if (_navigating) return;
     setState(() {
       _destination = point;
       _destinationName = null;
@@ -308,6 +315,71 @@ class _MapScreenState extends State<MapScreen> {
     } finally {
       if (mounted) setState(() => _routing = false);
     }
+  }
+
+  Future<void> _startNavigation() async {
+    if (_routePoints.length < 2 || _navigating) return;
+
+    final enabled = await Geolocator.isLocationServiceEnabled();
+    if (!enabled) {
+      _msg('خدمة الموقع (GPS) مغلقة. فعّلها من إعدادات الهاتف ثم حاول مرة أخرى.');
+      return;
+    }
+    var permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+    if (permission == LocationPermission.denied ||
+        permission == LocationPermission.deniedForever) {
+      _msg('نحتاج إذن الموقع لبدء الملاحة.', settings: true);
+      return;
+    }
+    if (!mounted) return;
+
+    setState(() {
+      _navigating = true;
+      _results = [];
+      _speedKmh = null;
+    });
+    FocusScope.of(context).unfocus();
+
+    if (_myLocation != null) {
+      _controller.move(_myLocation!, 17);
+    }
+
+    await _positionSub?.cancel();
+    _positionSub = Geolocator.getPositionStream(
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.bestForNavigation,
+        distanceFilter: 5,
+      ),
+    ).listen(
+      (position) {
+        if (!mounted) return;
+        final here = LatLng(position.latitude, position.longitude);
+        final speed = position.speed;
+        setState(() {
+          _myLocation = here;
+          _speedKmh = speed >= 0 ? speed * 3.6 : null;
+        });
+        final zoom = _controller.camera.zoom;
+        _controller.move(here, zoom < 16 ? 17 : zoom);
+      },
+      onError: (_) {
+        _msg('تعذّرت متابعة موقعك. تأكد من تفعيل GPS.');
+        _stopNavigation();
+      },
+    );
+  }
+
+  void _stopNavigation() {
+    _positionSub?.cancel();
+    _positionSub = null;
+    if (!mounted) return;
+    setState(() {
+      _navigating = false;
+      _speedKmh = null;
+    });
   }
 
   Widget _searchBar() {
@@ -412,10 +484,10 @@ class _MapScreenState extends State<MapScreen> {
               ),
             ),
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
             child: SizedBox(
               width: double.infinity,
-              child: FilledButton.icon(
+              child: FilledButton.tonalIcon(
                 onPressed: _routing ? null : _computeRoute,
                 icon: _routing
                     ? const SizedBox(
@@ -428,7 +500,42 @@ class _MapScreenState extends State<MapScreen> {
               ),
             ),
           ),
+          if (hasRoute)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  onPressed: _startNavigation,
+                  icon: const Icon(Icons.navigation),
+                  label: const Text('ابدأ الملاحة'),
+                ),
+              ),
+            ),
         ],
+      ),
+    );
+  }
+
+  Widget _navigationCard() {
+    final scheme = Theme.of(context).colorScheme;
+    final speed = _speedKmh;
+    return Material(
+      elevation: 4,
+      color: scheme.surface,
+      borderRadius: BorderRadius.circular(12),
+      child: ListTile(
+        leading: Icon(Icons.navigation, color: scheme.primary),
+        title: const Text('الملاحة جارية'),
+        subtitle: Text(
+          speed == null
+              ? 'جارٍ تحديد السرعة...'
+              : 'السرعة: ${speed.round()} كم/س',
+        ),
+        trailing: FilledButton.tonal(
+          onPressed: _stopNavigation,
+          child: const Text('إنهاء'),
+        ),
       ),
     );
   }
@@ -552,19 +659,9 @@ class _MapScreenState extends State<MapScreen> {
             right: 12,
             child: Column(
               children: [
-                _searchBar(),
-                if (_results.isNotEmpty) ...[
-                  const SizedBox(height: 8),
-                  _resultsList(),
-                ] else if (_destination != null) ...[
-                  const SizedBox(height: 8),
-                  _destinationCard(),
-                ],
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
+                if (_navigating)
+                  _navigationCard()
+                else ...[
+                  _searchBar(),
+                  if (_results.isNotEmpty) ...[
+                    c
