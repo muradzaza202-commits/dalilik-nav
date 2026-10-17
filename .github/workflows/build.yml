@@ -36,6 +36,7 @@ jobs:
           cp /tmp/main.dart lib/main.dart
           rm -rf test
           sed -i 's/android:label="[^"]*"/android:label="دليلك"/' android/app/src/main/AndroidManifest.xml
+          sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>\n    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>\n    <application#' android/app/src/main/AndroidManifest.xml
 
       - name: Get packages
         run: flutter pub get
