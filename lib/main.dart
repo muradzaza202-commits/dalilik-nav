@@ -1,7 +1,10 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
 
 void main() {
@@ -32,6 +35,13 @@ class DalilikApp extends StatelessWidget {
   }
 }
 
+class PlaceResult {
+  final String name;
+  final LatLng point;
+
+  const PlaceResult({required this.name, required this.point});
+}
+
 class MapScreen extends StatefulWidget {
   const MapScreen({super.key});
 
@@ -41,10 +51,22 @@ class MapScreen extends StatefulWidget {
 
 class _MapScreenState extends State<MapScreen> {
   final MapController _controller = MapController();
+  final TextEditingController _searchController = TextEditingController();
   static const LatLng _start = LatLng(24.7136, 46.6753);
 
   LatLng? _myLocation;
   bool _locating = false;
+
+  bool _searching = false;
+  List<PlaceResult> _results = [];
+  LatLng? _destination;
+  String? _destinationName;
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
 
   void _zoom(double delta) {
     final cam = _controller.camera;
@@ -106,11 +128,168 @@ class _MapScreenState extends State<MapScreen> {
       if (!mounted) return;
       setState(() => _myLocation = here);
       _controller.move(here, 16);
-    } catch (e) {
+    } catch (_) {
       _msg('تعذّر تحديد موقعك. تأكد من تفعيل GPS وحاول مرة أخرى.');
     } finally {
       if (mounted) setState(() => _locating = false);
     }
+  }
+
+  Future<void> _search() async {
+    final query = _searchController.text.trim();
+    if (query.isEmpty || _searching) return;
+    FocusScope.of(context).unfocus();
+    setState(() {
+      _searching = true;
+      _results = [];
+    });
+    try {
+      final uri = Uri.https('nominatim.openstreetmap.org', '/search', {
+        'q': query,
+        'format': 'jsonv2',
+        'limit': '8',
+        'accept-language': 'ar',
+      });
+      final response = await http.get(
+        uri,
+        headers: {'User-Agent': 'Dalilik/0.1 (Flutter navigation app)'},
+      ).timeout(const Duration(seconds: 15));
+
+      if (response.statusCode != 200) {
+        _msg('تعذّر البحث الآن (رمز ${response.statusCode}). حاول لاحقاً.');
+        return;
+      }
+
+      final data = jsonDecode(utf8.decode(response.bodyBytes)) as List<dynamic>;
+      final results = data.map((e) {
+        return PlaceResult(
+          name: e['display_name'] as String,
+          point: LatLng(
+            double.parse(e['lat'] as String),
+            double.parse(e['lon'] as String),
+          ),
+        );
+      }).toList();
+
+      if (!mounted) return;
+      setState(() => _results = results);
+      if (results.isEmpty) {
+        _msg('لا توجد نتائج لهذا البحث.');
+      }
+    } catch (_) {
+      _msg('تعذّر البحث. تأكد من الاتصال بالإنترنت وحاول مرة أخرى.');
+    } finally {
+      if (mounted) setState(() => _searching = false);
+    }
+  }
+
+  void _selectPlace(PlaceResult place) {
+    setState(() {
+      _destination = place.point;
+      _destinationName = place.name;
+      _results = [];
+    });
+    _controller.move(place.point, 15);
+  }
+
+  void _setDestinationFromMap(LatLng point) {
+    setState(() {
+      _destination = point;
+      _destinationName = null;
+      _results = [];
+    });
+    FocusScope.of(context).unfocus();
+  }
+
+  void _clearDestination() {
+    setState(() {
+      _destination = null;
+      _destinationName = null;
+    });
+  }
+
+  Widget _searchBar() {
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      elevation: 4,
+      color: scheme.surface,
+      borderRadius: BorderRadius.circular(12),
+      child: TextField(
+        controller: _searchController,
+        textInputAction: TextInputAction.search,
+        onSubmitted: (_) => _search(),
+        decoration: InputDecoration(
+          hintText: 'ابحث عن مدينة أو شارع أو مكان',
+          border: InputBorder.none,
+          contentPadding:
+              const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          suffixIcon: _searching
+              ? const Padding(
+                  padding: EdgeInsets.all(12),
+                  child: SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                )
+              : IconButton(
+                  icon: const Icon(Icons.search),
+                  onPressed: _search,
+                ),
+        ),
+      ),
+    );
+  }
+
+  Widget _resultsList() {
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      elevation: 4,
+      color: scheme.surface,
+      borderRadius: BorderRadius.circular(12),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxHeight: 280),
+        child: ListView.separated(
+          shrinkWrap: true,
+          padding: EdgeInsets.zero,
+          itemCount: _results.length,
+          separatorBuilder: (_, __) => const Divider(height: 1),
+          itemBuilder: (context, index) {
+            final place = _results[index];
+            return ListTile(
+              leading: const Icon(Icons.place_outlined),
+              title: Text(
+                place.name,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+              onTap: () => _selectPlace(place),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _destinationCard() {
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      elevation: 4,
+      color: scheme.surface,
+      borderRadius: BorderRadius.circular(12),
+      child: ListTile(
+        leading: const Icon(Icons.flag, color: Colors.red),
+        title: Text(
+          _destinationName ?? 'وجهة محددة على الخريطة',
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+        ),
+        trailing: IconButton(
+          icon: const Icon(Icons.close),
+          onPressed: _clearDestination,
+        ),
+      ),
+    );
   }
 
   @override
@@ -129,6 +308,8 @@ class _MapScreenState extends State<MapScreen> {
               initialZoom: 12,
               minZoom: 3,
               maxZoom: 18,
+              onLongPress: (tapPosition, point) =>
+                  _setDestinationFromMap(point),
             ),
             children: [
               TileLayer(
@@ -151,6 +332,22 @@ class _MapScreenState extends State<MapScreen> {
                             BoxShadow(blurRadius: 6, color: Colors.black38),
                           ],
                         ),
+                      ),
+                    ),
+                  ],
+                ),
+              if (_destination != null)
+                MarkerLayer(
+                  markers: [
+                    Marker(
+                      point: _destination!,
+                      width: 44,
+                      height: 44,
+                      alignment: Alignment.topCenter,
+                      child: const Icon(
+                        Icons.location_on,
+                        color: Colors.red,
+                        size: 44,
                       ),
                     ),
                   ],
@@ -194,6 +391,23 @@ class _MapScreenState extends State<MapScreen> {
                       child: CircularProgressIndicator(strokeWidth: 3),
                     )
                   : const Icon(Icons.my_location),
+            ),
+          ),
+          Positioned(
+            top: 8,
+            left: 12,
+            right: 12,
+            child: Column(
+              children: [
+                _searchBar(),
+                if (_results.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  _resultsList(),
+                ] else if (_destination != null) ...[
+                  const SizedBox(height: 8),
+                  _destinationCard(),
+                ],
+              ],
             ),
           ),
         ],
