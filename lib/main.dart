@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:latlong2/latlong.dart';
 
 void main() {
   runApp(const DalilikApp());
@@ -24,62 +26,76 @@ class DalilikApp extends StatelessWidget {
         useMaterial3: true,
         colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFF0B7A75)),
       ),
-      home: const HomeScreen(),
+      home: const MapScreen(),
     );
   }
 }
 
-class HomeScreen extends StatelessWidget {
-  const HomeScreen({super.key});
+class MapScreen extends StatefulWidget {
+  const MapScreen({super.key});
+
+  @override
+  State<MapScreen> createState() => _MapScreenState();
+}
+
+class _MapScreenState extends State<MapScreen> {
+  final MapController _controller = MapController();
+  static const LatLng _start = LatLng(24.7136, 46.6753);
+
+  void _zoom(double delta) {
+    final cam = _controller.camera;
+    _controller.move(cam.center, cam.zoom + delta);
+  }
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
     return Scaffold(
-      body: SafeArea(
-        child: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(24),
+      appBar: AppBar(
+        title: const Text('دليلك'),
+        centerTitle: true,
+      ),
+      body: Stack(
+        children: [
+          FlutterMap(
+            mapController: _controller,
+            options: MapOptions(
+              initialCenter: _start,
+              initialZoom: 12,
+              minZoom: 3,
+              maxZoom: 18,
+            ),
+            children: [
+              TileLayer(
+                urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                userAgentPackageName: 'com.dalilik.dalilik',
+              ),
+              RichAttributionWidget(
+                attributions: [
+                  TextSourceAttribution('© مساهمو OpenStreetMap'),
+                ],
+              ),
+            ],
+          ),
+          Positioned(
+            left: 16,
+            bottom: 48,
             child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Container(
-                  width: 120,
-                  height: 120,
-                  decoration: BoxDecoration(
-                    color: scheme.primary,
-                    shape: BoxShape.circle,
-                  ),
-                  child: Icon(
-                    Icons.navigation,
-                    size: 64,
-                    color: scheme.onPrimary,
-                  ),
-                ),
-                const SizedBox(height: 24),
-                Text(
-                  'دليلك',
-                  style: Theme.of(context).textTheme.displayMedium?.copyWith(
-                        fontWeight: FontWeight.bold,
-                        color: scheme.primary,
-                      ),
+                FloatingActionButton.small(
+                  heroTag: 'zoom_in',
+                  onPressed: () => _zoom(1),
+                  child: const Icon(Icons.add),
                 ),
                 const SizedBox(height: 8),
-                Text(
-                  'طريقك أوضح، ووصولك أسهل',
-                  textAlign: TextAlign.center,
-                  style: Theme.of(context).textTheme.titleMedium,
-                ),
-                const SizedBox(height: 32),
-                Text(
-                  'نسخة اختبار البناء - لا توجد خرائط بعد',
-                  textAlign: TextAlign.center,
-                  style: Theme.of(context).textTheme.bodyMedium,
+                FloatingActionButton.small(
+                  heroTag: 'zoom_out',
+                  onPressed: () => _zoom(-1),
+                  child: const Icon(Icons.remove),
                 ),
               ],
             ),
           ),
-        ),
+        ],
       ),
     );
   }
