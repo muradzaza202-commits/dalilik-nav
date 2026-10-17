@@ -62,6 +62,11 @@ class _MapScreenState extends State<MapScreen> {
   LatLng? _destination;
   String? _destinationName;
 
+  bool _routing = false;
+  List<LatLng> _routePoints = [];
+  double? _distanceMeters;
+  double? _durationSeconds;
+
   @override
   void dispose() {
     _searchController.dispose();
@@ -90,6 +95,29 @@ class _MapScreenState extends State<MapScreen> {
             : null,
       ),
     );
+  }
+
+  void _resetRoute() {
+    _routePoints = [];
+    _distanceMeters = null;
+    _durationSeconds = null;
+  }
+
+  String _formatDistance(double meters) {
+    if (meters < 1000) {
+      return '${meters.round()} م';
+    }
+    return '${(meters / 1000).toStringAsFixed(1)} كم';
+  }
+
+  String _formatDuration(double seconds) {
+    final minutes = (seconds / 60).round();
+    if (minutes < 1) return 'أقل من دقيقة';
+    if (minutes < 60) return '$minutes دقيقة';
+    final hours = minutes ~/ 60;
+    final rest = minutes % 60;
+    if (rest == 0) return '$hours ساعة';
+    return '$hours ساعة و$rest دقيقة';
   }
 
   Future<void> _locateMe() async {
@@ -127,7 +155,9 @@ class _MapScreenState extends State<MapScreen> {
       final here = LatLng(position.latitude, position.longitude);
       if (!mounted) return;
       setState(() => _myLocation = here);
-      _controller.move(here, 16);
+      if (_destination == null) {
+        _controller.move(here, 16);
+      }
     } catch (_) {
       _msg('تعذّر تحديد موقعك. تأكد من تفعيل GPS وحاول مرة أخرى.');
     } finally {
@@ -188,6 +218,7 @@ class _MapScreenState extends State<MapScreen> {
       _destination = place.point;
       _destinationName = place.name;
       _results = [];
+      _resetRoute();
     });
     _controller.move(place.point, 15);
   }
@@ -197,6 +228,7 @@ class _MapScreenState extends State<MapScreen> {
       _destination = point;
       _destinationName = null;
       _results = [];
+      _resetRoute();
     });
     FocusScope.of(context).unfocus();
   }
@@ -205,7 +237,77 @@ class _MapScreenState extends State<MapScreen> {
     setState(() {
       _destination = null;
       _destinationName = null;
+      _resetRoute();
     });
+  }
+
+  Future<void> _computeRoute() async {
+    if (_destination == null || _routing) return;
+
+    if (_myLocation == null) {
+      await _locateMe();
+    }
+    if (!mounted) return;
+
+    final from = _myLocation;
+    final to = _destination;
+    if (from == null || to == null) {
+      _msg('نحتاج موقعك الحالي لحساب المسار. فعّل GPS واسمح بالإذن ثم حاول مرة أخرى.');
+      return;
+    }
+
+    setState(() => _routing = true);
+    try {
+      final uri = Uri.https(
+        'router.project-osrm.org',
+        '/route/v1/driving/${from.longitude},${from.latitude};${to.longitude},${to.latitude}',
+        {'overview': 'full', 'geometries': 'geojson'},
+      );
+      final response = await http.get(
+        uri,
+        headers: {'User-Agent': 'Dalilik/0.1 (Flutter navigation app)'},
+      ).timeout(const Duration(seconds: 20));
+
+      if (response.statusCode != 200) {
+        _msg('تعذّر حساب المسار الآن (رمز ${response.statusCode}). حاول لاحقاً.');
+        return;
+      }
+
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      final routes = data['routes'] as List<dynamic>?;
+      if (data['code'] != 'Ok' || routes == null || routes.isEmpty) {
+        _msg('لم يتم العثور على مسار بري بين موقعك وهذه الوجهة.');
+        return;
+      }
+
+      final route = routes[0] as Map<String, dynamic>;
+      final geometry = route['geometry'] as Map<String, dynamic>;
+      final coordinates = geometry['coordinates'] as List<dynamic>;
+      final points = coordinates.map((c) {
+        final p = c as List<dynamic>;
+        return LatLng((p[1] as num).toDouble(), (p[0] as num).toDouble());
+      }).toList();
+
+      if (!mounted) return;
+      setState(() {
+        _routePoints = points;
+        _distanceMeters = (route['distance'] as num).toDouble();
+        _durationSeconds = (route['duration'] as num).toDouble();
+      });
+
+      if (points.length > 1) {
+        _controller.fitCamera(
+          CameraFit.bounds(
+            bounds: LatLngBounds.fromPoints(points),
+            padding: const EdgeInsets.fromLTRB(40, 200, 40, 120),
+          ),
+        );
+      }
+    } catch (_) {
+      _msg('تعذّر حساب المسار. تأكد من الاتصال بالإنترنت وحاول مرة أخرى.');
+    } finally {
+      if (mounted) setState(() => _routing = false);
+    }
   }
 
   Widget _searchBar() {
@@ -273,21 +375,60 @@ class _MapScreenState extends State<MapScreen> {
 
   Widget _destinationCard() {
     final scheme = Theme.of(context).colorScheme;
+    final hasRoute = _distanceMeters != null && _durationSeconds != null;
     return Material(
       elevation: 4,
       color: scheme.surface,
       borderRadius: BorderRadius.circular(12),
-      child: ListTile(
-        leading: const Icon(Icons.flag, color: Colors.red),
-        title: Text(
-          _destinationName ?? 'وجهة محددة على الخريطة',
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
-        ),
-        trailing: IconButton(
-          icon: const Icon(Icons.close),
-          onPressed: _clearDestination,
-        ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ListTile(
+            leading: const Icon(Icons.flag, color: Colors.red),
+            title: Text(
+              _destinationName ?? 'وجهة محددة على الخريطة',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+            trailing: IconButton(
+              icon: const Icon(Icons.close),
+              onPressed: _clearDestination,
+            ),
+          ),
+          if (hasRoute)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: Row(
+                children: [
+                  const Icon(Icons.route, size: 20),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      '${_formatDistance(_distanceMeters!)}  •  ${_formatDuration(_durationSeconds!)}',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+            child: SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                onPressed: _routing ? null : _computeRoute,
+                icon: _routing
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.directions),
+                label: Text(hasRoute ? 'إعادة حساب المسار' : 'احسب المسار'),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -316,6 +457,18 @@ class _MapScreenState extends State<MapScreen> {
                 urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
                 userAgentPackageName: 'com.dalilik.dalilik',
               ),
+              if (_routePoints.length > 1)
+                PolylineLayer(
+                  polylines: [
+                    Polyline(
+                      points: _routePoints,
+                      strokeWidth: 6,
+                      color: const Color(0xFF1565C0),
+                      borderStrokeWidth: 2,
+                      borderColor: Colors.white,
+                    ),
+                  ],
+                ),
               if (_myLocation != null)
                 MarkerLayer(
                   markers: [
