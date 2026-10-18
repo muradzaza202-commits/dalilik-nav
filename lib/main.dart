@@ -664,4 +664,18 @@ class _MapScreenState extends State<MapScreen> {
                 else ...[
                   _searchBar(),
                   if (_results.isNotEmpty) ...[
-                    c
+                    const SizedBox(height: 8),
+                    _resultsList(),
+                  ] else if (_destination != null) ...[
+                    const SizedBox(height: 8),
+                    _destinationCard(),
+                  ],
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
