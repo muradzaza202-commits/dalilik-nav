@@ -43,6 +43,97 @@ class PlaceResult {
   const PlaceResult({required this.name, required this.point});
 }
 
+class NavStep {
+  final String instruction;
+  final String type;
+  final String? modifier;
+  final LatLng point;
+  final double distance;
+  final double duration;
+
+  const NavStep({
+    required this.instruction,
+    required this.type,
+    required this.modifier,
+    required this.point,
+    required this.distance,
+    required this.duration,
+  });
+}
+
+String _arabicInstruction(
+  String type,
+  String? modifier,
+  String name,
+  int? exit,
+) {
+  final onName = name.isNotEmpty ? ' على $name' : '';
+  final toName = name.isNotEmpty ? ' إلى $name' : '';
+
+  switch (type) {
+    case 'depart':
+      return 'ابدأ السير$onName';
+    case 'arrive':
+      return 'وصلت إلى وجهتك';
+    case 'roundabout':
+    case 'rotary':
+    case 'roundabout turn':
+      if (exit != null) {
+        return 'ادخل الدوّار وخذ المخرج رقم $exit$toName';
+      }
+      return 'ادخل الدوّار$toName';
+    case 'exit roundabout':
+    case 'exit rotary':
+      return 'اخرج من الدوّار$toName';
+  }
+
+  switch (modifier) {
+    case 'uturn':
+      return 'استدر للخلف$toName';
+    case 'sharp right':
+      return 'انعطف يميناً بحدّة$toName';
+    case 'right':
+      return 'انعطف يميناً$toName';
+    case 'slight right':
+      return 'انعطف قليلاً يميناً$toName';
+    case 'straight':
+      return 'تابع مستقيماً$onName';
+    case 'slight left':
+      return 'انعطف قليلاً يساراً$toName';
+    case 'left':
+      return 'انعطف يساراً$toName';
+    case 'sharp left':
+      return 'انعطف يساراً بحدّة$toName';
+  }
+  return 'تابع السير$onName';
+}
+
+IconData _maneuverIcon(String type, String? modifier) {
+  if (type == 'arrive') return Icons.flag;
+  if (type == 'roundabout' || type == 'rotary' || type == 'roundabout turn') {
+    return Icons.roundabout_left;
+  }
+  switch (modifier) {
+    case 'uturn':
+      return Icons.u_turn_left;
+    case 'sharp right':
+      return Icons.turn_sharp_right;
+    case 'right':
+      return Icons.turn_right;
+    case 'slight right':
+      return Icons.turn_slight_right;
+    case 'straight':
+      return Icons.straight;
+    case 'slight left':
+      return Icons.turn_slight_left;
+    case 'left':
+      return Icons.turn_left;
+    case 'sharp left':
+      return Icons.turn_sharp_left;
+  }
+  return Icons.navigation;
+}
+
 class MapScreen extends StatefulWidget {
   const MapScreen({super.key});
 
@@ -67,10 +158,13 @@ class _MapScreenState extends State<MapScreen> {
   List<LatLng> _routePoints = [];
   double? _distanceMeters;
   double? _durationSeconds;
+  List<NavStep> _steps = [];
 
   bool _navigating = false;
   StreamSubscription<Position>? _positionSub;
   double? _speedKmh;
+  int _nextStep = 0;
+  double _distToNext = 0;
 
   @override
   void dispose() {
@@ -107,6 +201,9 @@ class _MapScreenState extends State<MapScreen> {
     _routePoints = [];
     _distanceMeters = null;
     _durationSeconds = null;
+    _steps = [];
+    _nextStep = 0;
+    _distToNext = 0;
   }
 
   String _formatDistance(double meters) {
@@ -124,6 +221,17 @@ class _MapScreenState extends State<MapScreen> {
     final rest = minutes % 60;
     if (rest == 0) return '$hours ساعة';
     return '$hours ساعة و$rest دقيقة';
+  }
+
+  void _updateProgress(LatLng here) {
+    if (_steps.isEmpty) return;
+    const distance = Distance();
+    var d = distance.as(LengthUnit.Meter, here, _steps[_nextStep].point);
+    while (_nextStep < _steps.length - 1 && d < 25) {
+      _nextStep++;
+      d = distance.as(LengthUnit.Meter, here, _steps[_nextStep].point);
+    }
+    _distToNext = d;
   }
 
   Future<void> _locateMe() async {
@@ -268,7 +376,7 @@ class _MapScreenState extends State<MapScreen> {
       final uri = Uri.https(
         'router.project-osrm.org',
         '/route/v1/driving/${from.longitude},${from.latitude};${to.longitude},${to.latitude}',
-        {'overview': 'full', 'geometries': 'geojson'},
+        {'overview': 'full', 'geometries': 'geojson', 'steps': 'true'},
       );
       final response = await http.get(
         uri,
@@ -295,9 +403,41 @@ class _MapScreenState extends State<MapScreen> {
         return LatLng((p[1] as num).toDouble(), (p[0] as num).toDouble());
       }).toList();
 
+      final steps = <NavStep>[];
+      final legs = (route['legs'] as List<dynamic>?) ?? [];
+      for (final leg in legs) {
+        final legSteps =
+            ((leg as Map<String, dynamic>)['steps'] as List<dynamic>?) ?? [];
+        for (final s in legSteps) {
+          final step = s as Map<String, dynamic>;
+          final maneuver = step['maneuver'] as Map<String, dynamic>;
+          final loc = maneuver['location'] as List<dynamic>;
+          final type = (maneuver['type'] as String?) ?? '';
+          final modifier = maneuver['modifier'] as String?;
+          final name = (step['name'] as String?) ?? '';
+          final exit = (maneuver['exit'] as num?)?.toInt();
+          steps.add(
+            NavStep(
+              instruction: _arabicInstruction(type, modifier, name, exit),
+              type: type,
+              modifier: modifier,
+              point: LatLng(
+                (loc[1] as num).toDouble(),
+                (loc[0] as num).toDouble(),
+              ),
+              distance: (step['distance'] as num).toDouble(),
+              duration: (step['duration'] as num).toDouble(),
+            ),
+          );
+        }
+      }
+
       if (!mounted) return;
       setState(() {
         _routePoints = points;
+        _steps = steps;
+        _nextStep = 0;
+        _distToNext = 0;
         _distanceMeters = (route['distance'] as num).toDouble();
         _durationSeconds = (route['duration'] as num).toDouble();
       });
@@ -340,6 +480,12 @@ class _MapScreenState extends State<MapScreen> {
       _navigating = true;
       _results = [];
       _speedKmh = null;
+      _nextStep = _steps.length > 1 ? 1 : 0;
+      _distToNext = 0;
+      final here = _myLocation;
+      if (here != null) {
+        _updateProgress(here);
+      }
     });
     FocusScope.of(context).unfocus();
 
@@ -361,6 +507,7 @@ class _MapScreenState extends State<MapScreen> {
         setState(() {
           _myLocation = here;
           _speedKmh = speed >= 0 ? speed * 3.6 : null;
+          _updateProgress(here);
         });
         final zoom = _controller.camera.zoom;
         _controller.move(here, zoom < 16 ? 17 : zoom);
@@ -381,8 +528,7 @@ class _MapScreenState extends State<MapScreen> {
       _speedKmh = null;
     });
   }
-
-  Widget _searchBar() {
+    Widget _searchBar() {
     final scheme = Theme.of(context).colorScheme;
     return Material(
       elevation: 4,
@@ -519,22 +665,85 @@ class _MapScreenState extends State<MapScreen> {
 
   Widget _navigationCard() {
     final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
     final speed = _speedKmh;
+    final hasSteps = _steps.isNotEmpty;
+    final step = hasSteps ? _steps[_nextStep] : null;
+
+    var remainingMeters = _distToNext;
+    var remainingSeconds = 0.0;
+    for (var i = _nextStep; i < _steps.length; i++) {
+      remainingMeters += _steps[i].distance;
+      remainingSeconds += _steps[i].duration;
+    }
+
+    final speedText = speed == null
+        ? 'جارٍ تحديد السرعة...'
+        : 'السرعة: ${speed.round()} كم/س';
+
     return Material(
       elevation: 4,
       color: scheme.surface,
       borderRadius: BorderRadius.circular(12),
-      child: ListTile(
-        leading: Icon(Icons.navigation, color: scheme.primary),
-        title: const Text('الملاحة جارية'),
-        subtitle: Text(
-          speed == null
-              ? 'جارٍ تحديد السرعة...'
-              : 'السرعة: ${speed.round()} كم/س',
-        ),
-        trailing: FilledButton.tonal(
-          onPressed: _stopNavigation,
-          child: const Text('إنهاء'),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (step != null)
+              Row(
+                children: [
+                  Icon(
+                    _maneuverIcon(step.type, step.modifier),
+                    size: 40,
+                    color: scheme.primary,
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          _formatDistance(_distToNext),
+                          style: textTheme.titleLarge
+                              ?.copyWith(fontWeight: FontWeight.bold),
+                        ),
+                        Text(
+                          step.instruction,
+                          style: textTheme.titleMedium,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              )
+            else
+              Text('الملاحة جارية', style: textTheme.titleMedium),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'المتبقي: ${_formatDistance(remainingMeters)}  •  ${_formatDuration(remainingSeconds)}',
+                        style: textTheme.bodySmall,
+                      ),
+                      Text(speedText, style: textTheme.bodySmall),
+                    ],
+                  ),
+                ),
+                FilledButton.tonal(
+                  onPressed: _stopNavigation,
+                  child: const Text('إنهاء'),
+                ),
+              ],
+            ),
+          ],
         ),
       ),
     );
