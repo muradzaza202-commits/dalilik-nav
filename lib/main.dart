@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_map/flutter_map.dart';
+import 'package:flutter_tts/flutter_tts.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
@@ -166,9 +167,16 @@ class _MapScreenState extends State<MapScreen> {
   int _nextStep = 0;
   double _distToNext = 0;
 
+  final FlutterTts _tts = FlutterTts();
+  bool _ttsReady = false;
+  bool _voiceOn = true;
+  int _spokenStep = -1;
+  int _spokenStage = 0;
+
   @override
   void dispose() {
     _positionSub?.cancel();
+    _tts.stop();
     _searchController.dispose();
     super.dispose();
   }
@@ -204,6 +212,8 @@ class _MapScreenState extends State<MapScreen> {
     _steps = [];
     _nextStep = 0;
     _distToNext = 0;
+    _spokenStep = -1;
+    _spokenStage = 0;
   }
 
   String _formatDistance(double meters) {
@@ -221,6 +231,91 @@ class _MapScreenState extends State<MapScreen> {
     final rest = minutes % 60;
     if (rest == 0) return '$hours ساعة';
     return '$hours ساعة و$rest دقيقة';
+  }
+
+  String _spokenDistance(double meters) {
+    if (meters >= 1000) {
+      return '${(meters / 1000).toStringAsFixed(1)} كيلومتر';
+    }
+    var rounded = (meters / 10).round() * 10;
+    if (rounded < 10) rounded = 10;
+    return '$rounded متر';
+  }
+
+  int _stageFor(double d) {
+    if (d <= 30) return 3;
+    if (d <= 150) return 2;
+    if (d <= 500) return 1;
+    return 0;
+  }
+
+  Future<void> _initTts() async {
+    if (_ttsReady) return;
+    try {
+      final available = await _tts.isLanguageAvailable('ar');
+      if (available == true || available == 1) {
+        await _tts.setLanguage('ar');
+        await _tts.setSpeechRate(0.45);
+        await _tts.setVolume(1.0);
+        await _tts.setPitch(1.0);
+        _ttsReady = true;
+      } else {
+        _msg('الصوت العربي غير متوفر في هاتفك. فعّل بيانات اللغة العربية في إعدادات تحويل النص إلى كلام.');
+      }
+    } catch (_) {
+      _msg('تعذّر تشغيل النطق الصوتي على هذا الهاتف.');
+    }
+  }
+
+  Future<void> _speak(String text) async {
+    if (!_voiceOn || !_ttsReady) return;
+    try {
+      await _tts.stop();
+      await _tts.speak(text);
+    } catch (_) {}
+  }
+
+  void _announceStart() {
+    if (!_voiceOn || _steps.isEmpty) return;
+    if (_myLocation == null) {
+      _speak('بدأت الملاحة');
+      return;
+    }
+    final step = _steps[_nextStep];
+    _spokenStep = _nextStep;
+    _spokenStage = _stageFor(_distToNext);
+    if (step.type == 'arrive') {
+      _speak('بدأت الملاحة. ${step.instruction}');
+      return;
+    }
+    _speak(
+      'بدأت الملاحة. بعد ${_spokenDistance(_distToNext)} ${step.instruction}',
+    );
+  }
+
+  void _maybeSpeak() {
+    if (!_voiceOn || !_navigating || _steps.isEmpty) return;
+    if (_nextStep != _spokenStep) {
+      _spokenStep = _nextStep;
+      _spokenStage = 0;
+    }
+    final step = _steps[_nextStep];
+    final stage = _stageFor(_distToNext);
+    if (stage > _spokenStage) {
+      _spokenStage = stage;
+      if (stage == 3 || step.type == 'arrive') {
+        _speak(step.instruction);
+      } else {
+        _speak('بعد ${_spokenDistance(_distToNext)} ${step.instruction}');
+      }
+    }
+  }
+
+  void _toggleVoice() {
+    setState(() => _voiceOn = !_voiceOn);
+    if (!_voiceOn) {
+      _tts.stop();
+    }
   }
 
   void _updateProgress(LatLng here) {
@@ -438,6 +533,8 @@ class _MapScreenState extends State<MapScreen> {
         _steps = steps;
         _nextStep = 0;
         _distToNext = 0;
+        _spokenStep = -1;
+        _spokenStage = 0;
         _distanceMeters = (route['distance'] as num).toDouble();
         _durationSeconds = (route['duration'] as num).toDouble();
       });
@@ -482,6 +579,8 @@ class _MapScreenState extends State<MapScreen> {
       _speedKmh = null;
       _nextStep = _steps.length > 1 ? 1 : 0;
       _distToNext = 0;
+      _spokenStep = -1;
+      _spokenStage = 0;
       final here = _myLocation;
       if (here != null) {
         _updateProgress(here);
@@ -492,6 +591,10 @@ class _MapScreenState extends State<MapScreen> {
     if (_myLocation != null) {
       _controller.move(_myLocation!, 17);
     }
+
+    await _initTts();
+    if (!mounted || !_navigating) return;
+    _announceStart();
 
     await _positionSub?.cancel();
     _positionSub = Geolocator.getPositionStream(
@@ -509,6 +612,7 @@ class _MapScreenState extends State<MapScreen> {
           _speedKmh = speed >= 0 ? speed * 3.6 : null;
           _updateProgress(here);
         });
+        _maybeSpeak();
         final zoom = _controller.camera.zoom;
         _controller.move(here, zoom < 16 ? 17 : zoom);
       },
@@ -522,10 +626,13 @@ class _MapScreenState extends State<MapScreen> {
   void _stopNavigation() {
     _positionSub?.cancel();
     _positionSub = null;
+    _tts.stop();
     if (!mounted) return;
     setState(() {
       _navigating = false;
       _speedKmh = null;
+      _spokenStep = -1;
+      _spokenStage = 0;
     });
   }
     Widget _searchBar() {
@@ -735,6 +842,13 @@ class _MapScreenState extends State<MapScreen> {
                       ),
                       Text(speedText, style: textTheme.bodySmall),
                     ],
+                  ),
+                ),
+                IconButton(
+                  tooltip: _voiceOn ? 'كتم الصوت' : 'تشغيل الصوت',
+                  onPressed: _toggleVoice,
+                  icon: Icon(
+                    _voiceOn ? Icons.volume_up : Icons.volume_off,
                   ),
                 ),
                 FilledButton.tonal(
