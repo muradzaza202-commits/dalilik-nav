@@ -173,6 +173,10 @@ class _MapScreenState extends State<MapScreen> {
   int _spokenStep = -1;
   int _spokenStage = 0;
 
+  int _offRouteCount = 0;
+  bool _rerouting = false;
+  DateTime? _lastReroute;
+
   @override
   void dispose() {
     _positionSub?.cancel();
@@ -214,6 +218,7 @@ class _MapScreenState extends State<MapScreen> {
     _distToNext = 0;
     _spokenStep = -1;
     _spokenStage = 0;
+    _offRouteCount = 0;
   }
 
   String _formatDistance(double meters) {
@@ -327,6 +332,85 @@ class _MapScreenState extends State<MapScreen> {
       d = distance.as(LengthUnit.Meter, here, _steps[_nextStep].point);
     }
     _distToNext = d;
+  }
+
+  double _routeDistanceSq(LatLng p) {
+    if (_routePoints.length < 2) return 0;
+    const dist = Distance();
+    final mLat = dist.as(
+          LengthUnit.Meter,
+          p,
+          LatLng(p.latitude + 0.001, p.longitude),
+        ) /
+        0.001;
+    final mLon = dist.as(
+          LengthUnit.Meter,
+          p,
+          LatLng(p.latitude, p.longitude + 0.001),
+        ) /
+        0.001;
+    var best = double.infinity;
+    for (var i = 0; i < _routePoints.length - 1; i++) {
+      final a = _routePoints[i];
+      final b = _routePoints[i + 1];
+      final ax = (a.longitude - p.longitude) * mLon;
+      final ay = (a.latitude - p.latitude) * mLat;
+      final bx = (b.longitude - p.longitude) * mLon;
+      final by = (b.latitude - p.latitude) * mLat;
+      final dx = bx - ax;
+      final dy = by - ay;
+      final len2 = dx * dx + dy * dy;
+      final t = (len2 == 0 ? 0.0 : -(ax * dx + ay * dy) / len2)
+          .clamp(0.0, 1.0)
+          .toDouble();
+      final cx = ax + t * dx;
+      final cy = ay + t * dy;
+      final d2 = cx * cx + cy * cy;
+      if (d2 < best) best = d2;
+    }
+    return best;
+  }
+
+  void _checkOffRoute(LatLng here, double accuracy) {
+    if (!_navigating || _rerouting || _routing) return;
+    if (_routePoints.length < 2 || accuracy > 40) return;
+    if (_routeDistanceSq(here) > 40 * 40) {
+      _offRouteCount++;
+    } else {
+      _offRouteCount = 0;
+      return;
+    }
+    if (_offRouteCount < 3) return;
+    final last = _lastReroute;
+    if (last != null && DateTime.now().difference(last).inSeconds < 10) {
+      return;
+    }
+    _reroute();
+  }
+
+  Future<void> _reroute() async {
+    _rerouting = true;
+    _lastReroute = DateTime.now();
+    _offRouteCount = 0;
+    _speak('جارٍ إعادة حساب المسار');
+    final before = _routePoints;
+    await _computeRoute(silent: true);
+    _rerouting = false;
+    if (!mounted || !_navigating) return;
+    if (identical(before, _routePoints) || _steps.isEmpty) return;
+    setState(() {
+      _nextStep = _steps.length > 1 ? 1 : 0;
+      _spokenStep = _nextStep;
+      final here = _myLocation;
+      if (here != null) _updateProgress(here);
+      _spokenStage = _stageFor(_distToNext);
+    });
+    final step = _steps[_nextStep];
+    if (step.type == 'arrive') {
+      _speak(step.instruction);
+    } else {
+      _speak('بعد ${_spokenDistance(_distToNext)} ${step.instruction}');
+    }
   }
 
   Future<void> _locateMe() async {
@@ -451,7 +535,7 @@ class _MapScreenState extends State<MapScreen> {
     });
   }
 
-  Future<void> _computeRoute() async {
+  Future<void> _computeRoute({bool silent = false}) async {
     if (_destination == null || _routing) return;
 
     if (_myLocation == null) {
@@ -539,7 +623,7 @@ class _MapScreenState extends State<MapScreen> {
         _durationSeconds = (route['duration'] as num).toDouble();
       });
 
-      if (points.length > 1) {
+      if (!silent && points.length > 1) {
         _controller.fitCamera(
           CameraFit.bounds(
             bounds: LatLngBounds.fromPoints(points),
@@ -553,8 +637,7 @@ class _MapScreenState extends State<MapScreen> {
       if (mounted) setState(() => _routing = false);
     }
   }
-
-  Future<void> _startNavigation() async {
+    Future<void> _startNavigation() async {
     if (_routePoints.length < 2 || _navigating) return;
 
     final enabled = await Geolocator.isLocationServiceEnabled();
@@ -581,6 +664,7 @@ class _MapScreenState extends State<MapScreen> {
       _distToNext = 0;
       _spokenStep = -1;
       _spokenStage = 0;
+      _offRouteCount = 0;
       final here = _myLocation;
       if (here != null) {
         _updateProgress(here);
@@ -613,6 +697,7 @@ class _MapScreenState extends State<MapScreen> {
           _updateProgress(here);
         });
         _maybeSpeak();
+        _checkOffRoute(here, position.accuracy);
         final zoom = _controller.camera.zoom;
         _controller.move(here, zoom < 16 ? 17 : zoom);
       },
@@ -633,9 +718,11 @@ class _MapScreenState extends State<MapScreen> {
       _speedKmh = null;
       _spokenStep = -1;
       _spokenStage = 0;
+      _offRouteCount = 0;
     });
   }
-    Widget _searchBar() {
+
+  Widget _searchBar() {
     final scheme = Theme.of(context).colorScheme;
     return Material(
       elevation: 4,
@@ -741,7 +828,7 @@ class _MapScreenState extends State<MapScreen> {
             child: SizedBox(
               width: double.infinity,
               child: FilledButton.tonalIcon(
-                onPressed: _routing ? null : _computeRoute,
+                onPressed: _routing ? null : () => _computeRoute(),
                 icon: _routing
                     ? const SizedBox(
                         width: 18,
