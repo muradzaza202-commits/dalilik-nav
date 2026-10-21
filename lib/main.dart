@@ -62,6 +62,20 @@ class NavStep {
   });
 }
 
+class RouteOption {
+  final List<LatLng> points;
+  final List<NavStep> steps;
+  final double distance;
+  final double duration;
+
+  const RouteOption({
+    required this.points,
+    required this.steps,
+    required this.distance,
+    required this.duration,
+  });
+}
+
 String _arabicInstruction(
   String type,
   String? modifier,
@@ -160,6 +174,8 @@ class _MapScreenState extends State<MapScreen> {
   double? _distanceMeters;
   double? _durationSeconds;
   List<NavStep> _steps = [];
+  List<RouteOption> _options = [];
+  int _selected = 0;
 
   bool _navigating = false;
   StreamSubscription<Position>? _positionSub;
@@ -214,11 +230,40 @@ class _MapScreenState extends State<MapScreen> {
     _distanceMeters = null;
     _durationSeconds = null;
     _steps = [];
+    _options = [];
+    _selected = 0;
     _nextStep = 0;
     _distToNext = 0;
     _spokenStep = -1;
     _spokenStage = 0;
     _offRouteCount = 0;
+  }
+
+  void _applyOption(RouteOption o) {
+    _routePoints = o.points;
+    _steps = o.steps;
+    _distanceMeters = o.distance;
+    _durationSeconds = o.duration;
+    _nextStep = 0;
+    _distToNext = 0;
+    _spokenStep = -1;
+    _spokenStage = 0;
+    _offRouteCount = 0;
+  }
+
+  void _selectOption(int i) {
+    if (_navigating || i == _selected) return;
+    if (i < 0 || i >= _options.length) return;
+    setState(() {
+      _selected = i;
+      _applyOption(_options[i]);
+    });
+  }
+
+  String _optionLabel(int i, int fastest) {
+    final o = _options[i];
+    final prefix = i == fastest ? 'الأسرع • ' : '';
+    return '$prefix${_formatDistance(o.distance)} • ${_formatDuration(o.duration)}';
   }
 
   String _formatDistance(double meters) {
@@ -535,6 +580,51 @@ class _MapScreenState extends State<MapScreen> {
     });
   }
 
+  RouteOption _parseRoute(Map<String, dynamic> route) {
+    final geometry = route['geometry'] as Map<String, dynamic>;
+    final coordinates = geometry['coordinates'] as List<dynamic>;
+    final points = coordinates.map((c) {
+      final p = c as List<dynamic>;
+      return LatLng((p[1] as num).toDouble(), (p[0] as num).toDouble());
+    }).toList();
+
+    final steps = <NavStep>[];
+    final legs = (route['legs'] as List<dynamic>?) ?? [];
+    for (final leg in legs) {
+      final legSteps =
+          ((leg as Map<String, dynamic>)['steps'] as List<dynamic>?) ?? [];
+      for (final s in legSteps) {
+        final step = s as Map<String, dynamic>;
+        final maneuver = step['maneuver'] as Map<String, dynamic>;
+        final loc = maneuver['location'] as List<dynamic>;
+        final type = (maneuver['type'] as String?) ?? '';
+        final modifier = maneuver['modifier'] as String?;
+        final name = (step['name'] as String?) ?? '';
+        final exit = (maneuver['exit'] as num?)?.toInt();
+        steps.add(
+          NavStep(
+            instruction: _arabicInstruction(type, modifier, name, exit),
+            type: type,
+            modifier: modifier,
+            point: LatLng(
+              (loc[1] as num).toDouble(),
+              (loc[0] as num).toDouble(),
+            ),
+            distance: (step['distance'] as num).toDouble(),
+            duration: (step['duration'] as num).toDouble(),
+          ),
+        );
+      }
+    }
+
+    return RouteOption(
+      points: points,
+      steps: steps,
+      distance: (route['distance'] as num).toDouble(),
+      duration: (route['duration'] as num).toDouble(),
+    );
+  }
+
   Future<void> _computeRoute({bool silent = false}) async {
     if (_destination == null || _routing) return;
 
@@ -555,7 +645,12 @@ class _MapScreenState extends State<MapScreen> {
       final uri = Uri.https(
         'router.project-osrm.org',
         '/route/v1/driving/${from.longitude},${from.latitude};${to.longitude},${to.latitude}',
-        {'overview': 'full', 'geometries': 'geojson', 'steps': 'true'},
+        {
+          'overview': 'full',
+          'geometries': 'geojson',
+          'steps': 'true',
+          'alternatives': '3',
+        },
       );
       final response = await http.get(
         uri,
@@ -574,59 +669,22 @@ class _MapScreenState extends State<MapScreen> {
         return;
       }
 
-      final route = routes[0] as Map<String, dynamic>;
-      final geometry = route['geometry'] as Map<String, dynamic>;
-      final coordinates = geometry['coordinates'] as List<dynamic>;
-      final points = coordinates.map((c) {
-        final p = c as List<dynamic>;
-        return LatLng((p[1] as num).toDouble(), (p[0] as num).toDouble());
-      }).toList();
-
-      final steps = <NavStep>[];
-      final legs = (route['legs'] as List<dynamic>?) ?? [];
-      for (final leg in legs) {
-        final legSteps =
-            ((leg as Map<String, dynamic>)['steps'] as List<dynamic>?) ?? [];
-        for (final s in legSteps) {
-          final step = s as Map<String, dynamic>;
-          final maneuver = step['maneuver'] as Map<String, dynamic>;
-          final loc = maneuver['location'] as List<dynamic>;
-          final type = (maneuver['type'] as String?) ?? '';
-          final modifier = maneuver['modifier'] as String?;
-          final name = (step['name'] as String?) ?? '';
-          final exit = (maneuver['exit'] as num?)?.toInt();
-          steps.add(
-            NavStep(
-              instruction: _arabicInstruction(type, modifier, name, exit),
-              type: type,
-              modifier: modifier,
-              point: LatLng(
-                (loc[1] as num).toDouble(),
-                (loc[0] as num).toDouble(),
-              ),
-              distance: (step['distance'] as num).toDouble(),
-              duration: (step['duration'] as num).toDouble(),
-            ),
-          );
-        }
+      final options = <RouteOption>[];
+      for (final r in routes) {
+        options.add(_parseRoute(r as Map<String, dynamic>));
       }
 
       if (!mounted) return;
       setState(() {
-        _routePoints = points;
-        _steps = steps;
-        _nextStep = 0;
-        _distToNext = 0;
-        _spokenStep = -1;
-        _spokenStage = 0;
-        _distanceMeters = (route['distance'] as num).toDouble();
-        _durationSeconds = (route['duration'] as num).toDouble();
+        _options = options;
+        _selected = 0;
+        _applyOption(options[0]);
       });
 
-      if (!silent && points.length > 1) {
+      if (!silent && _routePoints.length > 1) {
         _controller.fitCamera(
           CameraFit.bounds(
-            bounds: LatLngBounds.fromPoints(points),
+            bounds: LatLngBounds.fromPoints(_routePoints),
             padding: const EdgeInsets.fromLTRB(40, 200, 40, 120),
           ),
         );
@@ -791,6 +849,10 @@ class _MapScreenState extends State<MapScreen> {
   Widget _destinationCard() {
     final scheme = Theme.of(context).colorScheme;
     final hasRoute = _distanceMeters != null && _durationSeconds != null;
+    var fastest = 0;
+    for (var i = 1; i < _options.length; i++) {
+      if (_options[i].duration < _options[fastest].duration) fastest = i;
+    }
     return Material(
       elevation: 4,
       color: scheme.surface,
@@ -824,6 +886,25 @@ class _MapScreenState extends State<MapScreen> {
                     ),
                   ),
                 ],
+              ),
+            ),
+          if (_options.length > 1)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: Align(
+                alignment: AlignmentDirectional.centerStart,
+                child: Wrap(
+                  spacing: 8,
+                  runSpacing: 4,
+                  children: [
+                    for (var i = 0; i < _options.length; i++)
+                      ChoiceChip(
+                        label: Text(_optionLabel(i, fastest)),
+                        selected: i == _selected,
+                        onSelected: (_) => _selectOption(i),
+                      ),
+                  ],
+                ),
               ),
             ),
           Padding(
@@ -876,7 +957,7 @@ class _MapScreenState extends State<MapScreen> {
     return Align(
       alignment: AlignmentDirectional.topStart,
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 260),
+        constraints: const BoxConstraints(maxWidth: 275),
         child: Material(
           elevation: 3,
           color: scheme.surface.withOpacity(0.92),
@@ -892,7 +973,7 @@ class _MapScreenState extends State<MapScreen> {
                     if (step != null) ...[
                       Icon(
                         _maneuverIcon(step.type, step.modifier),
-                        size: 22,
+                        size: 24,
                         color: scheme.primary,
                       ),
                       const SizedBox(width: 6),
@@ -903,14 +984,14 @@ class _MapScreenState extends State<MapScreen> {
                             Text(
                               _formatDistance(_distToNext),
                               style: const TextStyle(
-                                fontSize: 14,
+                                fontSize: 16,
                                 fontWeight: FontWeight.bold,
                                 height: 1.1,
                               ),
                             ),
                             Text(
                               step.instruction,
-                              style: const TextStyle(fontSize: 11, height: 1.1),
+                              style: const TextStyle(fontSize: 13, height: 1.1),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                             ),
@@ -921,11 +1002,11 @@ class _MapScreenState extends State<MapScreen> {
                       const Expanded(
                         child: Text(
                           'الملاحة جارية',
-                          style: TextStyle(fontSize: 12),
+                          style: TextStyle(fontSize: 14),
                         ),
                       ),
                     IconButton(
-                      iconSize: 18,
+                      iconSize: 20,
                       padding: const EdgeInsets.all(4),
                       constraints: const BoxConstraints(),
                       visualDensity: VisualDensity.compact,
@@ -936,7 +1017,7 @@ class _MapScreenState extends State<MapScreen> {
                       ),
                     ),
                     IconButton(
-                      iconSize: 18,
+                      iconSize: 20,
                       padding: const EdgeInsets.all(4),
                       constraints: const BoxConstraints(),
                       visualDensity: VisualDensity.compact,
@@ -948,7 +1029,7 @@ class _MapScreenState extends State<MapScreen> {
                 ),
                 Text(
                   '${_formatDistance(remainingMeters)} • ${_formatDuration(remainingSeconds)} • $speedText',
-                  style: const TextStyle(fontSize: 10, height: 1.2),
+                  style: const TextStyle(fontSize: 12, height: 1.2),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
@@ -987,6 +1068,15 @@ class _MapScreenState extends State<MapScreen> {
               if (_routePoints.length > 1)
                 PolylineLayer(
                   polylines: [
+                    for (var i = 0; i < _options.length; i++)
+                      if (i != _selected && !_navigating)
+                        Polyline(
+                          points: _options[i].points,
+                          strokeWidth: 5,
+                          color: const Color(0xFF90A4AE),
+                          borderStrokeWidth: 1.5,
+                          borderColor: Colors.white,
+                        ),
                     Polyline(
                       points: _routePoints,
                       strokeWidth: 6,
