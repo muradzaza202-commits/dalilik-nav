@@ -701,7 +701,7 @@ class _MapScreenState extends State<MapScreen> {
         final zoom = _controller.camera.zoom;
         final z = zoom < 16 ? 17.0 : zoom;
         final scale = 1 << z.round();
-        final shift = 90 * 360 * 0.85 / (256 * scale);
+        final shift = 60 * 360 * 0.85 / (256 * scale);
         _controller.move(LatLng(here.latitude + shift, here.longitude), z);
       },
       onError: (_) {
@@ -862,7 +862,6 @@ class _MapScreenState extends State<MapScreen> {
 
   Widget _navigationCard() {
     final scheme = Theme.of(context).colorScheme;
-    final textTheme = Theme.of(context).textTheme;
     final speed = _speedKmh;
     final step = _steps.isNotEmpty ? _steps[_nextStep] : null;
 
@@ -877,13 +876,13 @@ class _MapScreenState extends State<MapScreen> {
     return Align(
       alignment: AlignmentDirectional.topStart,
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 380),
+        constraints: const BoxConstraints(maxWidth: 260),
         child: Material(
-          elevation: 4,
+          elevation: 3,
           color: scheme.surface.withOpacity(0.92),
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(10),
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -893,22 +892,25 @@ class _MapScreenState extends State<MapScreen> {
                     if (step != null) ...[
                       Icon(
                         _maneuverIcon(step.type, step.modifier),
-                        size: 30,
+                        size: 22,
                         color: scheme.primary,
                       ),
-                      const SizedBox(width: 8),
+                      const SizedBox(width: 6),
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
                               _formatDistance(_distToNext),
-                              style: textTheme.titleMedium
-                                  ?.copyWith(fontWeight: FontWeight.bold),
+                              style: const TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.bold,
+                                height: 1.1,
+                              ),
                             ),
                             Text(
                               step.instruction,
-                              style: textTheme.bodySmall,
+                              style: const TextStyle(fontSize: 11, height: 1.1),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                             ),
@@ -916,8 +918,16 @@ class _MapScreenState extends State<MapScreen> {
                         ),
                       ),
                     ] else
-                      const Expanded(child: Text('الملاحة جارية')),
+                      const Expanded(
+                        child: Text(
+                          'الملاحة جارية',
+                          style: TextStyle(fontSize: 12),
+                        ),
+                      ),
                     IconButton(
+                      iconSize: 18,
+                      padding: const EdgeInsets.all(4),
+                      constraints: const BoxConstraints(),
                       visualDensity: VisualDensity.compact,
                       tooltip: _voiceOn ? 'كتم الصوت' : 'تشغيل الصوت',
                       onPressed: _toggleVoice,
@@ -926,6 +936,9 @@ class _MapScreenState extends State<MapScreen> {
                       ),
                     ),
                     IconButton(
+                      iconSize: 18,
+                      padding: const EdgeInsets.all(4),
+                      constraints: const BoxConstraints(),
                       visualDensity: VisualDensity.compact,
                       tooltip: 'إنهاء الملاحة',
                       onPressed: _stopNavigation,
@@ -934,8 +947,10 @@ class _MapScreenState extends State<MapScreen> {
                   ],
                 ),
                 Text(
-                  '${_formatDistance(remainingMeters)}  •  ${_formatDuration(remainingSeconds)}  •  $speedText',
-                  style: textTheme.bodySmall,
+                  '${_formatDistance(remainingMeters)} • ${_formatDuration(remainingSeconds)} • $speedText',
+                  style: const TextStyle(fontSize: 10, height: 1.2),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
               ],
             ),
