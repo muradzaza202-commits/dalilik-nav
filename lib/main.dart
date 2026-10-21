@@ -699,7 +699,10 @@ class _MapScreenState extends State<MapScreen> {
         _maybeSpeak();
         _checkOffRoute(here, position.accuracy);
         final zoom = _controller.camera.zoom;
-        _controller.move(here, zoom < 16 ? 17 : zoom);
+        final z = zoom < 16 ? 17.0 : zoom;
+        final scale = 1 << z.round();
+        final shift = 90 * 360 * 0.85 / (256 * scale);
+        _controller.move(LatLng(here.latitude + shift, here.longitude), z);
       },
       onError: (_) {
         _msg('تعذّرت متابعة موقعك. تأكد من تفعيل GPS.');
@@ -861,8 +864,7 @@ class _MapScreenState extends State<MapScreen> {
     final scheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
     final speed = _speedKmh;
-    final hasSteps = _steps.isNotEmpty;
-    final step = hasSteps ? _steps[_nextStep] : null;
+    final step = _steps.isNotEmpty ? _steps[_nextStep] : null;
 
     var remainingMeters = _distToNext;
     var remainingSeconds = 0.0;
@@ -870,81 +872,74 @@ class _MapScreenState extends State<MapScreen> {
       remainingMeters += _steps[i].distance;
       remainingSeconds += _steps[i].duration;
     }
+    final speedText = speed == null ? '-- كم/س' : '${speed.round()} كم/س';
 
-    final speedText = speed == null
-        ? 'جارٍ تحديد السرعة...'
-        : 'السرعة: ${speed.round()} كم/س';
-
-    return Material(
-      elevation: 4,
-      color: scheme.surface,
-      borderRadius: BorderRadius.circular(12),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (step != null)
-              Row(
-                children: [
-                  Icon(
-                    _maneuverIcon(step.type, step.modifier),
-                    size: 40,
-                    color: scheme.primary,
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          _formatDistance(_distToNext),
-                          style: textTheme.titleLarge
-                              ?.copyWith(fontWeight: FontWeight.bold),
-                        ),
-                        Text(
-                          step.instruction,
-                          style: textTheme.titleMedium,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              )
-            else
-              Text('الملاحة جارية', style: textTheme.titleMedium),
-            const SizedBox(height: 8),
-            Row(
+    return Align(
+      alignment: AlignmentDirectional.topStart,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 380),
+        child: Material(
+          elevation: 4,
+          color: scheme.surface.withOpacity(0.92),
+          borderRadius: BorderRadius.circular(12),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'المتبقي: ${_formatDistance(remainingMeters)}  •  ${_formatDuration(remainingSeconds)}',
-                        style: textTheme.bodySmall,
+                Row(
+                  children: [
+                    if (step != null) ...[
+                      Icon(
+                        _maneuverIcon(step.type, step.modifier),
+                        size: 30,
+                        color: scheme.primary,
                       ),
-                      Text(speedText, style: textTheme.bodySmall),
-                    ],
-                  ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              _formatDistance(_distToNext),
+                              style: textTheme.titleMedium
+                                  ?.copyWith(fontWeight: FontWeight.bold),
+                            ),
+                            Text(
+                              step.instruction,
+                              style: textTheme.bodySmall,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ] else
+                      const Expanded(child: Text('الملاحة جارية')),
+                    IconButton(
+                      visualDensity: VisualDensity.compact,
+                      tooltip: _voiceOn ? 'كتم الصوت' : 'تشغيل الصوت',
+                      onPressed: _toggleVoice,
+                      icon: Icon(
+                        _voiceOn ? Icons.volume_up : Icons.volume_off,
+                      ),
+                    ),
+                    IconButton(
+                      visualDensity: VisualDensity.compact,
+                      tooltip: 'إنهاء الملاحة',
+                      onPressed: _stopNavigation,
+                      icon: const Icon(Icons.close),
+                    ),
+                  ],
                 ),
-                IconButton(
-                  tooltip: _voiceOn ? 'كتم الصوت' : 'تشغيل الصوت',
-                  onPressed: _toggleVoice,
-                  icon: Icon(
-                    _voiceOn ? Icons.volume_up : Icons.volume_off,
-                  ),
-                ),
-                FilledButton.tonal(
-                  onPressed: _stopNavigation,
-                  child: const Text('إنهاء'),
+                Text(
+                  '${_formatDistance(remainingMeters)}  •  ${_formatDuration(remainingSeconds)}  •  $speedText',
+                  style: textTheme.bodySmall,
                 ),
               ],
             ),
-          ],
+          ),
         ),
       ),
     );
