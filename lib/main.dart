@@ -79,7 +79,6 @@ class NavStep {
     required this.duration,
   });
 }
-
 class RouteOption {
   final List<LatLng> points;
   final List<NavStep> steps;
@@ -167,6 +166,7 @@ IconData _maneuverIcon(String type, String? modifier) {
   return Icons.navigation;
 }
 
+// END-2
 class MapScreen extends StatefulWidget {
   const MapScreen({super.key});
 
@@ -234,7 +234,8 @@ class _MapScreenState extends State<MapScreen> {
     super.dispose();
   }
 
-  Future<void> _loadHistory() async {
+// END-3
+    Future<void> _loadHistory() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final raw = prefs.getStringList(_historyKey) ?? [];
@@ -313,7 +314,8 @@ class _MapScreenState extends State<MapScreen> {
     _offRouteCount = 0;
   }
 
-  void _applyOption(RouteOption o) {
+// END-4
+    void _applyOption(RouteOption o) {
     _routePoints = o.points;
     _steps = o.steps;
     _distanceMeters = o.distance;
@@ -373,7 +375,8 @@ class _MapScreenState extends State<MapScreen> {
     return 0;
   }
 
-  Future<void> _initTts() async {
+// END-5
+   Future<void> _initTts() async {
     if (_ttsReady) return;
     try {
       final available = await _tts.isLanguageAvailable('ar');
@@ -442,332 +445,5 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
-  void _updateProgress(LatLng here) {
-    if (_steps.isEmpty) return;
-    const distance = Distance();
-    var d = distance.as(LengthUnit.Meter, here, _steps[_nextStep].point);
-    while (_nextStep < _steps.length - 1 && d < 25) {
-      _nextStep++;
-      d = distance.as(LengthUnit.Meter, here, _steps[_nextStep].point);
-    }
-    _distToNext = d;
-  }
-
-  double _routeDistanceSq(LatLng p) {
-    if (_routePoints.length < 2) return 0;
-    const dist = Distance();
-    final mLat = dist.as(
-          LengthUnit.Meter,
-          p,
-          LatLng(p.latitude + 0.001, p.longitude),
-        ) /
-        0.001;
-    final mLon = dist.as(
-          LengthUnit.Meter,
-          p,
-          LatLng(p.latitude, p.longitude + 0.001),
-        ) /
-        0.001;
-    var best = double.infinity;
-    for (var i = 0; i < _routePoints.length - 1; i++) {
-      final a = _routePoints[i];
-      final b = _routePoints[i + 1];
-      final ax = (a.longitude - p.longitude) * mLon;
-      final ay = (a.latitude - p.latitude) * mLat;
-      final bx = (b.longitude - p.longitude) * mLon;
-      final by = (b.latitude - p.latitude) * mLat;
-      final dx = bx - ax;
-      final dy = by - ay;
-      final len2 = dx * dx + dy * dy;
-      final t = (len2 == 0 ? 0.0 : -(ax * dx + ay * dy) / len2)
-          .clamp(0.0, 1.0)
-          .toDouble();
-      final cx = ax + t * dx;
-      final cy = ay + t * dy;
-      final d2 = cx * cx + cy * cy;
-      if (d2 < best) best = d2;
-    }
-    return best;
-  }
-
-  void _checkOffRoute(LatLng here, double accuracy) {
-    if (!_navigating || _rerouting || _routing) return;
-    if (_routePoints.length < 2 || accuracy > 40) return;
-    if (_routeDistanceSq(here) > 40 * 40) {
-      _offRouteCount++;
-    } else {
-      _offRouteCount = 0;
-      return;
-    }
-    if (_offRouteCount < 3) return;
-    final last = _lastReroute;
-    if (last != null && DateTime.now().difference(last).inSeconds < 10) {
-      return;
-    }
-    _reroute();
-  }
-
-  Future<void> _reroute() async {
-    _rerouting = true;
-    _lastReroute = DateTime.now();
-    _offRouteCount = 0;
-    _speak('جارٍ إعادة حساب المسار');
-    final before = _routePoints;
-    await _computeRoute(silent: true);
-    _rerouting = false;
-    if (!mounted || !_navigating) return;
-    if (identical(before, _routePoints) || _steps.isEmpty) return;
-    setState(() {
-      _nextStep = _steps.length > 1 ? 1 : 0;
-      _spokenStep = _nextStep;
-      final here = _myLocation;
-      if (here != null) _updateProgress(here);
-      _spokenStage = _stageFor(_distToNext);
-    });
-    final step = _steps[_nextStep];
-    if (step.type == 'arrive') {
-      _speak(step.instruction);
-    } else {
-      _speak('بعد ${_spokenDistance(_distToNext)} ${step.instruction}');
-    }
-  }
-
-  Future<void> _locateMe() async {
-    if (_locating) return;
-    setState(() => _locating = true);
-    try {
-      final enabled = await Geolocator.isLocationServiceEnabled();
-      if (!enabled) {
-        _msg('خدمة الموقع (GPS) مغلقة. فعّلها من إعدادات الهاتف ثم حاول مرة أخرى.');
-        return;
-      }
-
-      var permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission();
-      }
-      if (permission == LocationPermission.denied) {
-        _msg('لم يتم السماح بالوصول إلى الموقع، لذلك لا يمكن تحديد موقعك.');
-        return;
-      }
-      if (permission == LocationPermission.deniedForever) {
-        _msg(
-          'تم رفض إذن الموقع بشكل دائم. فعّله من إعدادات التطبيق.',
-          settings: true,
-        );
-        return;
-      }
-
-      final position = await Geolocator.getCurrentPosition(
-        locationSettings: LocationSettings(
-          accuracy: LocationAccuracy.high,
-          timeLimit: const Duration(seconds: 20),
-        ),
-      );
-      final here = LatLng(position.latitude, position.longitude);
-      if (!mounted) return;
-      setState(() => _myLocation = here);
-      if (_destination == null) {
-        _controller.move(here, 16);
-      }
-    } catch (_) {
-      _msg('تعذّر تحديد موقعك. تأكد من تفعيل GPS وحاول مرة أخرى.');
-    } finally {
-      if (mounted) setState(() => _locating = false);
-    }
-  }
-
-  Future<void> _search() async {
-    final query = _searchController.text.trim();
-    if (query.isEmpty || _searching) return;
-    FocusScope.of(context).unfocus();
-    setState(() {
-      _searching = true;
-      _results = [];
-    });
-    try {
-      final uri = Uri.https('nominatim.openstreetmap.org', '/search', {
-        'q': query,
-        'format': 'jsonv2',
-        'limit': '8',
-        'accept-language': 'ar',
-      });
-      final response = await http.get(
-        uri,
-        headers: {'User-Agent': 'Dalilik/0.1 (Flutter navigation app)'},
-      ).timeout(const Duration(seconds: 15));
-
-      if (response.statusCode != 200) {
-        _msg('تعذّر البحث الآن (رمز ${response.statusCode}). حاول لاحقاً.');
-        return;
-      }
-
-      final data = jsonDecode(utf8.decode(response.bodyBytes)) as List<dynamic>;
-      final results = data.map((e) {
-        return PlaceResult(
-          name: e['display_name'] as String,
-          point: LatLng(
-            double.parse(e['lat'] as String),
-            double.parse(e['lon'] as String),
-          ),
-        );
-      }).toList();
-
-      if (!mounted) return;
-      setState(() => _results = results);
-      if (results.isEmpty) {
-        _msg('لا توجد نتائج لهذا البحث.');
-      }
-    } catch (_) {
-      _msg('تعذّر البحث. تأكد من الاتصال بالإنترنت وحاول مرة أخرى.');
-    } finally {
-      if (mounted) setState(() => _searching = false);
-    }
-  }
-
-  void _selectPlace(PlaceResult place) {
-    FocusScope.of(context).unfocus();
-    setState(() {
-      _destination = place.point;
-      _destinationName = place.name;
-      _results = [];
-      _resetRoute();
-      _addToHistory(place);
-    });
-    _controller.move(place.point, 17);
-  }
-
-  void _setDestinationFromMap(LatLng point) {
-    if (_navigating) return;
-    setState(() {
-      _destination = point;
-      _destinationName = null;
-      _results = [];
-      _resetRoute();
-    });
-    FocusScope.of(context).unfocus();
-  }
-
-  void _clearDestination() {
-    setState(() {
-      _destination = null;
-      _destinationName = null;
-      _resetRoute();
-    });
-  }
-
-  RouteOption _parseRoute(Map<String, dynamic> route) {
-    final geometry = route['geometry'] as Map<String, dynamic>;
-    final coordinates = geometry['coordinates'] as List<dynamic>;
-    final points = coordinates.map((c) {
-      final p = c as List<dynamic>;
-      return LatLng((p[1] as num).toDouble(), (p[0] as num).toDouble());
-    }).toList();
-
-    final steps = <NavStep>[];
-    final legs = (route['legs'] as List<dynamic>?) ?? [];
-    for (final leg in legs) {
-      final legSteps =
-          ((leg as Map<String, dynamic>)['steps'] as List<dynamic>?) ?? [];
-      for (final s in legSteps) {
-        final step = s as Map<String, dynamic>;
-        final maneuver = step['maneuver'] as Map<String, dynamic>;
-        final loc = maneuver['location'] as List<dynamic>;
-        final type = (maneuver['type'] as String?) ?? '';
-        final modifier = maneuver['modifier'] as String?;
-        final name = (step['name'] as String?) ?? '';
-        final exit = (maneuver['exit'] as num?)?.toInt();
-        steps.add(
-          NavStep(
-            instruction: _arabicInstruction(type, modifier, name, exit),
-            type: type,
-            modifier: modifier,
-            point: LatLng(
-              (loc[1] as num).toDouble(),
-              (loc[0] as num).toDouble(),
-            ),
-            distance: (step['distance'] as num).toDouble(),
-            duration: (step['duration'] as num).toDouble(),
-          ),
-        );
-      }
-    }
-
-    return RouteOption(
-      points: points,
-      steps: steps,
-      distance: (route['distance'] as num).toDouble(),
-      duration: (route['duration'] as num).toDouble(),
-    );
-  }
-
-  Future<void> _computeRoute({bool silent = false}) async {
-    if (_destination == null || _routing) return;
-
-    if (_myLocation == null) {
-      await _locateMe();
-    }
-    if (!mounted) return;
-
-    final from = _myLocation;
-    final to = _destination;
-    if (from == null || to == null) {
-      _msg('نحتاج موقعك الحالي لحساب المسار. فعّل GPS واسمح بالإذن ثم حاول مرة أخرى.');
-      return;
-    }
-
-    setState(() => _routing = true);
-    try {
-      final uri = Uri.https(
-        'router.project-osrm.org',
-        '/route/v1/driving/${from.longitude},${from.latitude};${to.longitude},${to.latitude}',
-        {
-          'overview': 'full',
-          'geometries': 'geojson',
-          'steps': 'true',
-          'alternatives': '3',
-        },
-      );
-      final response = await http.get(
-        uri,
-        headers: {'User-Agent': 'Dalilik/0.1 (Flutter navigation app)'},
-      ).timeout(const Duration(seconds: 20));
-
-      if (response.statusCode != 200) {
-        _msg('تعذّر حساب المسار الآن (رمز ${response.statusCode}). حاول لاحقاً.');
-        return;
-      }
-
-      final data = jsonDecode(response.body) as Map<String, dynamic>;
-      final routes = data['routes'] as List<dynamic>?;
-      if (data['code'] != 'Ok' || routes == null || routes.isEmpty) {
-        _msg('لم يتم العثور على مسار بري بين موقعك وهذه الوجهة.');
-        return;
-      }
-
-      final options = <RouteOption>[];
-      for (final r in routes) {
-        options.add(_parseRoute(r as Map<String, dynamic>));
-      }
-
-      if (!mounted) return;
-      setState(() {
-        _options = options;
-        _selected = 0;
-        _applyOption(options[0]);
-      });
-
-      if (!silent && _routePoints.length > 1) {
-        _controller.fitCamera(
-          CameraFit.bounds(
-            bounds: LatLngBounds.fromPoints(_routePoints),
-            padding: const EdgeInsets.fromLTRB(40, 200, 40, 120),
-          ),
-        );
-      }
-    } catch (_) {
-      _msg('تعذّر حساب المسار. تأكد من الاتصال بالإنترنت وحاول مرة أخرى.');
-    } finally {
-      if (mounted) setState(() => _routing = false);
-    }
-  }
+// END-6
+  
