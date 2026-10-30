@@ -174,7 +174,7 @@ class MapScreen extends StatefulWidget {
   State<MapScreen> createState() => _MapScreenState();
 }
 
-class _MapScreenState extends State<MapScreen> {
+class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   final MapController _controller = MapController();
   final TextEditingController _searchController = TextEditingController();
   final FocusNode _searchFocus = FocusNode();
@@ -182,6 +182,16 @@ class _MapScreenState extends State<MapScreen> {
 
   static const String _historyKey = 'dalilik_search_history';
   static const int _historyMax = 10;
+
+  static const String _kDestLat = 'dalilik_dest_lat';
+  static const String _kDestLon = 'dalilik_dest_lon';
+  static const String _kDestName = 'dalilik_dest_name';
+  static const String _kNav = 'dalilik_nav_active';
+  static const String _kSavedAt = 'dalilik_saved_at';
+  static const String _kCamLat = 'dalilik_cam_lat';
+  static const String _kCamLon = 'dalilik_cam_lon';
+  static const String _kCamZoom = 'dalilik_cam_zoom';
+  static const int _stateMaxAgeMs = 2 * 60 * 60 * 1000;
   List<PlaceResult> _history = [];
 
   LatLng? _myLocation;
@@ -222,11 +232,22 @@ class _MapScreenState extends State<MapScreen> {
     _searchFocus.addListener(() {
       if (mounted) setState(() {});
     });
+    WidgetsBinding.instance.addObserver(this);
     _loadHistory();
+    _restoreState();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused) {
+      _saveState();
+    }
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _positionSub?.cancel();
     _tts.stop();
     _searchController.dispose();
@@ -273,6 +294,78 @@ class _MapScreenState extends State<MapScreen> {
   void _clearHistory() {
     setState(() => _history = []);
     _saveHistory();
+  }
+
+  Future<void> _saveState() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final dest = _destination;
+      if (dest == null) {
+        await prefs.remove(_kDestLat);
+        await prefs.remove(_kDestLon);
+        await prefs.remove(_kDestName);
+        await prefs.remove(_kNav);
+      } else {
+        await prefs.setDouble(_kDestLat, dest.latitude);
+        await prefs.setDouble(_kDestLon, dest.longitude);
+        final name = _destinationName;
+        if (name != null) {
+          await prefs.setString(_kDestName, name);
+        } else {
+          await prefs.remove(_kDestName);
+        }
+        await prefs.setBool(_kNav, _navigating);
+      }
+      await prefs.setInt(_kSavedAt, DateTime.now().millisecondsSinceEpoch);
+      try {
+        final cam = _controller.camera;
+        await prefs.setDouble(_kCamLat, cam.center.latitude);
+        await prefs.setDouble(_kCamLon, cam.center.longitude);
+        await prefs.setDouble(_kCamZoom, cam.zoom);
+      } catch (_) {}
+    } catch (_) {}
+  }
+
+  Future<void> _restoreState() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedAt = prefs.getInt(_kSavedAt) ?? 0;
+      final age = DateTime.now().millisecondsSinceEpoch - savedAt;
+      if (savedAt == 0 || age > _stateMaxAgeMs) {
+        await prefs.remove(_kDestLat);
+        await prefs.remove(_kDestLon);
+        await prefs.remove(_kDestName);
+        await prefs.remove(_kNav);
+        return;
+      }
+      final lat = prefs.getDouble(_kDestLat);
+      final lon = prefs.getDouble(_kDestLon);
+      final name = prefs.getString(_kDestName);
+      final wasNavigating = prefs.getBool(_kNav) ?? false;
+      final camLat = prefs.getDouble(_kCamLat);
+      final camLon = prefs.getDouble(_kCamLon);
+      final camZoom = prefs.getDouble(_kCamZoom);
+      if (!mounted) return;
+      if (_destination != null || _navigating) return;
+
+      if (camLat != null && camLon != null && camZoom != null) {
+        try {
+          _controller.move(LatLng(camLat, camLon), camZoom);
+        } catch (_) {}
+      }
+      if (lat == null || lon == null) return;
+
+      setState(() {
+        _destination = LatLng(lat, lon);
+        _destinationName = name;
+      });
+      await _computeRoute(silent: wasNavigating);
+      if (!mounted) return;
+      if (wasNavigating && _routePoints.length > 1) {
+        _msg('تم استئناف الملاحة بعد عودتك إلى التطبيق.');
+        await _startNavigation();
+      }
+    } catch (_) {}
   }
 
   void _zoom(double delta) {
@@ -635,6 +728,7 @@ class _MapScreenState extends State<MapScreen> {
       _addToHistory(place);
     });
     _controller.move(place.point, 17);
+    _saveState();
   }
 
   void _setDestinationFromMap(LatLng point) {
@@ -646,6 +740,7 @@ class _MapScreenState extends State<MapScreen> {
       _resetRoute();
     });
     FocusScope.of(context).unfocus();
+    _saveState();
   }
 
   void _clearDestination() {
@@ -654,6 +749,7 @@ class _MapScreenState extends State<MapScreen> {
       _destinationName = null;
       _resetRoute();
     });
+    _saveState();
   }
 
   RouteOption _parseRoute(Map<String, dynamic> route) {
@@ -806,6 +902,7 @@ class _MapScreenState extends State<MapScreen> {
       }
     });
     FocusScope.of(context).unfocus();
+    _saveState();
 
     if (_myLocation != null) {
       _controller.move(_myLocation!, 17);
@@ -858,6 +955,7 @@ class _MapScreenState extends State<MapScreen> {
       _spokenStage = 0;
       _offRouteCount = 0;
     });
+    _saveState();
   }
 
   bool get _showHistory =>
