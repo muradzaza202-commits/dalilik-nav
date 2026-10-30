@@ -8,6 +8,7 @@ import 'package:flutter_tts/flutter_tts.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   runApp(const DalilikApp());
@@ -42,6 +43,23 @@ class PlaceResult {
   final LatLng point;
 
   const PlaceResult({required this.name, required this.point});
+
+  Map<String, dynamic> toJson() => {
+        'name': name,
+        'lat': point.latitude,
+        'lon': point.longitude,
+      };
+
+  static PlaceResult? fromJson(Map<String, dynamic> j) {
+    final name = j['name'];
+    final lat = j['lat'];
+    final lon = j['lon'];
+    if (name is! String || lat is! num || lon is! num) return null;
+    return PlaceResult(
+      name: name,
+      point: LatLng(lat.toDouble(), lon.toDouble()),
+    );
+  }
 }
 
 class NavStep {
@@ -159,7 +177,12 @@ class MapScreen extends StatefulWidget {
 class _MapScreenState extends State<MapScreen> {
   final MapController _controller = MapController();
   final TextEditingController _searchController = TextEditingController();
+  final FocusNode _searchFocus = FocusNode();
   static const LatLng _start = LatLng(24.7136, 46.6753);
+
+  static const String _historyKey = 'dalilik_search_history';
+  static const int _historyMax = 10;
+  List<PlaceResult> _history = [];
 
   LatLng? _myLocation;
   bool _locating = false;
@@ -194,11 +217,62 @@ class _MapScreenState extends State<MapScreen> {
   DateTime? _lastReroute;
 
   @override
+  void initState() {
+    super.initState();
+    _searchFocus.addListener(() {
+      if (mounted) setState(() {});
+    });
+    _loadHistory();
+  }
+
+  @override
   void dispose() {
     _positionSub?.cancel();
     _tts.stop();
     _searchController.dispose();
+    _searchFocus.dispose();
     super.dispose();
+  }
+
+  Future<void> _loadHistory() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getStringList(_historyKey) ?? [];
+      final list = <PlaceResult>[];
+      for (final s in raw) {
+        try {
+          final item =
+              PlaceResult.fromJson(jsonDecode(s) as Map<String, dynamic>);
+          if (item != null) list.add(item);
+        } catch (_) {}
+      }
+      if (!mounted) return;
+      setState(() => _history = list);
+    } catch (_) {}
+  }
+
+  Future<void> _saveHistory() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList(
+        _historyKey,
+        _history.map((p) => jsonEncode(p.toJson())).toList(),
+      );
+    } catch (_) {}
+  }
+
+  void _addToHistory(PlaceResult place) {
+    final list = <PlaceResult>[place];
+    for (final p in _history) {
+      if (p.name != place.name) list.add(p);
+    }
+    _history = list.take(_historyMax).toList();
+    _saveHistory();
+  }
+
+  void _clearHistory() {
+    setState(() => _history = []);
+    _saveHistory();
   }
 
   void _zoom(double delta) {
@@ -552,11 +626,13 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   void _selectPlace(PlaceResult place) {
+    FocusScope.of(context).unfocus();
     setState(() {
       _destination = place.point;
       _destinationName = place.name;
       _results = [];
       _resetRoute();
+      _addToHistory(place);
     });
     _controller.move(place.point, 17);
   }
@@ -695,497 +771,3 @@ class _MapScreenState extends State<MapScreen> {
       if (mounted) setState(() => _routing = false);
     }
   }
-    Future<void> _startNavigation() async {
-    if (_routePoints.length < 2 || _navigating) return;
-
-    final enabled = await Geolocator.isLocationServiceEnabled();
-    if (!enabled) {
-      _msg('خدمة الموقع (GPS) مغلقة. فعّلها من إعدادات الهاتف ثم حاول مرة أخرى.');
-      return;
-    }
-    var permission = await Geolocator.checkPermission();
-    if (permission == LocationPermission.denied) {
-      permission = await Geolocator.requestPermission();
-    }
-    if (permission == LocationPermission.denied ||
-        permission == LocationPermission.deniedForever) {
-      _msg('نحتاج إذن الموقع لبدء الملاحة.', settings: true);
-      return;
-    }
-    if (!mounted) return;
-
-    setState(() {
-      _navigating = true;
-      _results = [];
-      _speedKmh = null;
-      _nextStep = _steps.length > 1 ? 1 : 0;
-      _distToNext = 0;
-      _spokenStep = -1;
-      _spokenStage = 0;
-      _offRouteCount = 0;
-      final here = _myLocation;
-      if (here != null) {
-        _updateProgress(here);
-      }
-    });
-    FocusScope.of(context).unfocus();
-
-    if (_myLocation != null) {
-      _controller.move(_myLocation!, 17);
-    }
-
-    await _initTts();
-    if (!mounted || !_navigating) return;
-    _announceStart();
-
-    await _positionSub?.cancel();
-    _positionSub = Geolocator.getPositionStream(
-      locationSettings: const LocationSettings(
-        accuracy: LocationAccuracy.bestForNavigation,
-        distanceFilter: 5,
-      ),
-    ).listen(
-      (position) {
-        if (!mounted) return;
-        final here = LatLng(position.latitude, position.longitude);
-        final speed = position.speed;
-        setState(() {
-          _myLocation = here;
-          _speedKmh = speed >= 0 ? speed * 3.6 : null;
-          _updateProgress(here);
-        });
-        _maybeSpeak();
-        _checkOffRoute(here, position.accuracy);
-        final zoom = _controller.camera.zoom;
-        final z = zoom < 16 ? 17.0 : zoom;
-        final scale = 1 << z.round();
-        final shift = 60 * 360 * 0.85 / (256 * scale);
-        _controller.move(LatLng(here.latitude + shift, here.longitude), z);
-      },
-      onError: (_) {
-        _msg('تعذّرت متابعة موقعك. تأكد من تفعيل GPS.');
-        _stopNavigation();
-      },
-    );
-  }
-
-  void _stopNavigation() {
-    _positionSub?.cancel();
-    _positionSub = null;
-    _tts.stop();
-    if (!mounted) return;
-    setState(() {
-      _navigating = false;
-      _speedKmh = null;
-      _spokenStep = -1;
-      _spokenStage = 0;
-      _offRouteCount = 0;
-    });
-  }
-
-  Widget _searchBar() {
-    final scheme = Theme.of(context).colorScheme;
-    return Material(
-      elevation: 4,
-      color: scheme.surface,
-      borderRadius: BorderRadius.circular(12),
-      child: TextField(
-        controller: _searchController,
-        textInputAction: TextInputAction.search,
-        onSubmitted: (_) => _search(),
-        decoration: InputDecoration(
-          hintText: 'ابحث عن مدينة أو شارع أو مكان',
-          border: InputBorder.none,
-          contentPadding:
-              const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-          suffixIcon: _searching
-              ? const Padding(
-                  padding: EdgeInsets.all(12),
-                  child: SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  ),
-                )
-              : IconButton(
-                  icon: const Icon(Icons.search),
-                  onPressed: _search,
-                ),
-        ),
-      ),
-    );
-  }
-
-  Widget _resultsList() {
-    final scheme = Theme.of(context).colorScheme;
-    return Material(
-      elevation: 4,
-      color: scheme.surface,
-      borderRadius: BorderRadius.circular(12),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxHeight: 280),
-        child: ListView.separated(
-          shrinkWrap: true,
-          padding: EdgeInsets.zero,
-          itemCount: _results.length,
-          separatorBuilder: (_, __) => const Divider(height: 1),
-          itemBuilder: (context, index) {
-            final place = _results[index];
-            return ListTile(
-              leading: const Icon(Icons.place_outlined),
-              title: Text(
-                place.name,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-              ),
-              onTap: () => _selectPlace(place),
-            );
-          },
-        ),
-      ),
-    );
-  }
-
-  Widget _destinationCard() {
-    final scheme = Theme.of(context).colorScheme;
-    final hasRoute = _distanceMeters != null && _durationSeconds != null;
-    var fastest = 0;
-    for (var i = 1; i < _options.length; i++) {
-      if (_options[i].duration < _options[fastest].duration) fastest = i;
-    }
-    return Material(
-      elevation: 4,
-      color: scheme.surface,
-      borderRadius: BorderRadius.circular(12),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          ListTile(
-            leading: const Icon(Icons.flag, color: Colors.red),
-            title: Text(
-              _destinationName ?? 'وجهة محددة على الخريطة',
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-            ),
-            trailing: IconButton(
-              icon: const Icon(Icons.close),
-              onPressed: _clearDestination,
-            ),
-          ),
-          if (hasRoute)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-              child: Row(
-                children: [
-                  const Icon(Icons.route, size: 20),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      '${_formatDistance(_distanceMeters!)}  •  ${_formatDuration(_durationSeconds!)}',
-                      style: Theme.of(context).textTheme.titleMedium,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          if (_options.length > 1)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-              child: Align(
-                alignment: AlignmentDirectional.centerStart,
-                child: Wrap(
-                  spacing: 8,
-                  runSpacing: 4,
-                  children: [
-                    for (var i = 0; i < _options.length; i++)
-                      ChoiceChip(
-                        label: Text(_optionLabel(i, fastest)),
-                        selected: i == _selected,
-                        onSelected: (_) => _selectOption(i),
-                      ),
-                  ],
-                ),
-              ),
-            ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-            child: SizedBox(
-              width: double.infinity,
-              child: FilledButton.tonalIcon(
-                onPressed: _routing ? null : () => _computeRoute(),
-                icon: _routing
-                    ? const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.directions),
-                label: Text(hasRoute ? 'إعادة حساب المسار' : 'احسب المسار'),
-              ),
-            ),
-          ),
-          if (hasRoute)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-              child: SizedBox(
-                width: double.infinity,
-                child: FilledButton.icon(
-                  onPressed: _startNavigation,
-                  icon: const Icon(Icons.navigation),
-                  label: const Text('ابدأ الملاحة'),
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  Widget _navigationCard() {
-    final scheme = Theme.of(context).colorScheme;
-    final speed = _speedKmh;
-    final step = _steps.isNotEmpty ? _steps[_nextStep] : null;
-
-    var remainingMeters = _distToNext;
-    var remainingSeconds = 0.0;
-    for (var i = _nextStep; i < _steps.length; i++) {
-      remainingMeters += _steps[i].distance;
-      remainingSeconds += _steps[i].duration;
-    }
-    final speedText = speed == null ? '-- كم/س' : '${speed.round()} كم/س';
-
-    return Align(
-      alignment: AlignmentDirectional.topStart,
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 275),
-        child: Material(
-          elevation: 3,
-          color: scheme.surface.withOpacity(0.92),
-          borderRadius: BorderRadius.circular(10),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    if (step != null) ...[
-                      Icon(
-                        _maneuverIcon(step.type, step.modifier),
-                        size: 24,
-                        color: scheme.primary,
-                      ),
-                      const SizedBox(width: 6),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              _formatDistance(_distToNext),
-                              style: const TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.bold,
-                                height: 1.1,
-                              ),
-                            ),
-                            Text(
-                              step.instruction,
-                              style: const TextStyle(fontSize: 13, height: 1.1),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ],
-                        ),
-                      ),
-                    ] else
-                      const Expanded(
-                        child: Text(
-                          'الملاحة جارية',
-                          style: TextStyle(fontSize: 14),
-                        ),
-                      ),
-                    IconButton(
-                      iconSize: 20,
-                      padding: const EdgeInsets.all(4),
-                      constraints: const BoxConstraints(),
-                      visualDensity: VisualDensity.compact,
-                      tooltip: _voiceOn ? 'كتم الصوت' : 'تشغيل الصوت',
-                      onPressed: _toggleVoice,
-                      icon: Icon(
-                        _voiceOn ? Icons.volume_up : Icons.volume_off,
-                      ),
-                    ),
-                    IconButton(
-                      iconSize: 20,
-                      padding: const EdgeInsets.all(4),
-                      constraints: const BoxConstraints(),
-                      visualDensity: VisualDensity.compact,
-                      tooltip: 'إنهاء الملاحة',
-                      onPressed: _stopNavigation,
-                      icon: const Icon(Icons.close),
-                    ),
-                  ],
-                ),
-                Text(
-                  '${_formatDistance(remainingMeters)} • ${_formatDuration(remainingSeconds)} • $speedText',
-                  style: const TextStyle(fontSize: 12, height: 1.2),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('دليلك'),
-        centerTitle: true,
-      ),
-      body: Stack(
-        children: [
-          FlutterMap(
-            mapController: _controller,
-            options: MapOptions(
-              initialCenter: _start,
-              initialZoom: 12,
-              minZoom: 3,
-              maxZoom: 18,
-              onLongPress: (tapPosition, point) =>
-                  _setDestinationFromMap(point),
-            ),
-            children: [
-              TileLayer(
-                urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                userAgentPackageName: 'com.dalilik.dalilik',
-              ),
-              if (_routePoints.length > 1)
-                PolylineLayer(
-                  polylines: [
-                    for (var i = 0; i < _options.length; i++)
-                      if (i != _selected && !_navigating)
-                        Polyline(
-                          points: _options[i].points,
-                          strokeWidth: 5,
-                          color: const Color(0xFF90A4AE),
-                          borderStrokeWidth: 1.5,
-                          borderColor: Colors.white,
-                        ),
-                    Polyline(
-                      points: _routePoints,
-                      strokeWidth: 6,
-                      color: const Color(0xFF1565C0),
-                      borderStrokeWidth: 2,
-                      borderColor: Colors.white,
-                    ),
-                  ],
-                ),
-              if (_myLocation != null)
-                MarkerLayer(
-                  markers: [
-                    Marker(
-                      point: _myLocation!,
-                      width: 24,
-                      height: 24,
-                      child: Container(
-                        decoration: BoxDecoration(
-                          color: Colors.blue,
-                          shape: BoxShape.circle,
-                          border: Border.all(color: Colors.white, width: 3),
-                          boxShadow: const [
-                            BoxShadow(blurRadius: 6, color: Colors.black38),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              if (_destination != null)
-                MarkerLayer(
-                  markers: [
-                    Marker(
-                      point: _destination!,
-                      width: 44,
-                      height: 44,
-                      alignment: Alignment.topCenter,
-                      child: const Icon(
-                        Icons.location_on,
-                        color: Colors.red,
-                        size: 44,
-                      ),
-                    ),
-                  ],
-                ),
-              RichAttributionWidget(
-                attributions: [
-                  TextSourceAttribution('© مساهمو OpenStreetMap'),
-                ],
-              ),
-            ],
-          ),
-          Positioned(
-            left: 16,
-            bottom: 48,
-            child: Column(
-              children: [
-                FloatingActionButton.small(
-                  heroTag: 'zoom_in',
-                  onPressed: () => _zoom(1),
-                  child: const Icon(Icons.add),
-                ),
-                const SizedBox(height: 8),
-                FloatingActionButton.small(
-                  heroTag: 'zoom_out',
-                  onPressed: () => _zoom(-1),
-                  child: const Icon(Icons.remove),
-                ),
-              ],
-            ),
-          ),
-          Positioned(
-            right: 16,
-            bottom: 64,
-            child: FloatingActionButton(
-              heroTag: 'locate',
-              onPressed: _locateMe,
-              child: _locating
-                  ? const SizedBox(
-                      width: 24,
-                      height: 24,
-                      child: CircularProgressIndicator(strokeWidth: 3),
-                    )
-                  : const Icon(Icons.my_location),
-            ),
-          ),
-          Positioned(
-            top: 8,
-            left: 12,
-            right: 12,
-            child: Column(
-              children: [
-                if (_navigating)
-                  _navigationCard()
-                else ...[
-                  _searchBar(),
-                  if (_results.isNotEmpty) ...[
-                    const SizedBox(height: 8),
-                    _resultsList(),
-                  ] else if (_destination != null) ...[
-                    const SizedBox(height: 8),
-                    _destinationCard(),
-                  ],
-                ],
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
