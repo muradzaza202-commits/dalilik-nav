@@ -1192,7 +1192,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     final speedText = speed == null ? '-- كم/س' : '${speed.round()} كم/س';
 
     return Align(
-      alignment: AlignmentDirectional.topStart,
+      alignment: Alignment.topLeft,
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 275),
         child: Material(
