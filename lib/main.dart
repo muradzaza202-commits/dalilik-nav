@@ -204,6 +204,322 @@ const List<PoiCategory> kPoiCategories = [
       ['["tourism"~"^(attraction|museum|viewpoint|gallery)\$"]']),
 ];
 
+class _StopItem {
+  final String name;
+  final LatLng point;
+  final String key;
+  final String sub;
+
+  const _StopItem(this.name, this.point, this.key, this.sub);
+}
+
+PoiCategory? poiCategoryByKey(String key) {
+  for (final c in kPoiCategories) {
+    if (c.key == key) return c;
+  }
+  return null;
+}
+
+class StopSheet extends StatefulWidget {
+  final List<LatLng> route;
+  final LatLng? me;
+  final void Function(PlaceResult place) onPick;
+
+  const StopSheet({
+    super.key,
+    required this.route,
+    required this.me,
+    required this.onPick,
+  });
+
+  @override
+  State<StopSheet> createState() => _StopSheetState();
+}
+
+class _StopSheetState extends State<StopSheet> {
+  final TextEditingController _q = TextEditingController();
+  String? _catKey;
+  bool _loading = false;
+  String? _note;
+  List<_StopItem> _items = [];
+
+  @override
+  void dispose() {
+    _q.dispose();
+    super.dispose();
+  }
+
+  List<LatLng> _samples() {
+    final r = widget.route;
+    if (r.length < 2) return [];
+    var start = 0;
+    final me = widget.me;
+    if (me != null) {
+      var best = double.infinity;
+      for (var i = 0; i < r.length; i++) {
+        final dx = r[i].latitude - me.latitude;
+        final dy = r[i].longitude - me.longitude;
+        final d = dx * dx + dy * dy;
+        if (d < best) {
+          best = d;
+          start = i;
+        }
+      }
+    }
+    const dist = Distance();
+    final pts = <LatLng>[r[start]];
+    var acc = 0.0;
+    var total = 0.0;
+    for (var i = start + 1; i < r.length; i++) {
+      final d = dist.as(LengthUnit.Meter, r[i - 1], r[i]);
+      acc += d;
+      total += d;
+      if (acc >= 400) {
+        pts.add(r[i]);
+        acc = 0;
+      }
+      if (total > 25000) break;
+    }
+    if (total <= 25000 && pts.last != r.last) pts.add(r.last);
+    return pts;
+  }
+
+  Future<void> _loadAlongRoute(PoiCategory cat) async {
+    if (_loading) return;
+    final pts = _samples();
+    if (pts.isEmpty) {
+      setState(() => _note = 'لا يوجد مسار لعرض الأماكن عليه.');
+      return;
+    }
+    final coords = pts.map((p) => '${p.latitude},${p.longitude}').join(',');
+    final parts = cat.filters.map((f) => 'nwr$f(around:500,$coords);').join();
+    final query = '[out:json][timeout:25];($parts);out center 60;';
+    setState(() {
+      _catKey = cat.key;
+      _loading = true;
+      _note = null;
+      _items = [];
+    });
+    try {
+      final response = await http.post(
+        Uri.parse('https://overpass-api.de/api/interpreter'),
+        headers: {'User-Agent': 'Dalilik/0.1 (Flutter navigation app)'},
+        body: {'data': query},
+      ).timeout(const Duration(seconds: 30));
+      if (response.statusCode != 200) {
+        if (mounted) {
+          setState(() =>
+              _note = 'تعذّر تحميل الأماكن الآن (رمز ${response.statusCode}).');
+        }
+        return;
+      }
+      final data =
+          jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
+      final elements = (data['elements'] as List<dynamic>?) ?? [];
+      const dist = Distance();
+      final me = widget.me;
+      final scored = <MapEntry<int, _StopItem>>[];
+      for (final e in elements) {
+        final m = e as Map<String, dynamic>;
+        double? lat = (m['lat'] as num?)?.toDouble();
+        double? lon = (m['lon'] as num?)?.toDouble();
+        final center = m['center'] as Map<String, dynamic>?;
+        if (lat == null && center != null) {
+          lat = (center['lat'] as num?)?.toDouble();
+          lon = (center['lon'] as num?)?.toDouble();
+        }
+        if (lat == null || lon == null) continue;
+        final tags = (m['tags'] as Map<String, dynamic>?) ?? {};
+        final rawName = (tags['name:ar'] ?? tags['name'] ?? '').toString();
+        final pt = LatLng(lat, lon);
+        var idx = 0;
+        var best = double.infinity;
+        for (var i = 0; i < pts.length; i++) {
+          final dx = pts[i].latitude - lat;
+          final dy = pts[i].longitude - lon;
+          final d = dx * dx + dy * dy;
+          if (d < best) {
+            best = d;
+            idx = i;
+          }
+        }
+        final sub = me == null
+            ? cat.label
+            : '${cat.label} • ${(dist.as(LengthUnit.Meter, me, pt) / 1000).toStringAsFixed(1)} كم';
+        scored.add(MapEntry(
+          idx,
+          _StopItem(rawName.isNotEmpty ? rawName : cat.label, pt, cat.key, sub),
+        ));
+      }
+      scored.sort((a, b) => a.key.compareTo(b.key));
+      if (!mounted) return;
+      setState(() {
+        _items = scored.map((e) => e.value).toList();
+        if (_items.isEmpty) {
+          _note = 'لا توجد أماكن من هذا النوع مسجّلة قرب مسارك.';
+        }
+      });
+    } catch (_) {
+      if (mounted) {
+        setState(() => _note = 'تعذّر تحميل الأماكن. تأكد من الاتصال بالإنترنت.');
+      }
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _searchByName() async {
+    final text = _q.text.trim();
+    if (text.isEmpty || _loading) return;
+    FocusScope.of(context).unfocus();
+    setState(() {
+      _catKey = null;
+      _loading = true;
+      _note = null;
+      _items = [];
+    });
+    try {
+      final me = widget.me;
+      final params = <String, String>{
+        'q': text,
+        'format': 'jsonv2',
+        'limit': '8',
+        'accept-language': 'ar',
+      };
+      if (me != null) {
+        params['viewbox'] =
+            '${me.longitude - 0.4},${me.latitude + 0.4},${me.longitude + 0.4},${me.latitude - 0.4}';
+      }
+      final response = await http.get(
+        Uri.https('nominatim.openstreetmap.org', '/search', params),
+        headers: {'User-Agent': 'Dalilik/0.1 (Flutter navigation app)'},
+      ).timeout(const Duration(seconds: 15));
+      if (response.statusCode != 200) {
+        if (mounted) {
+          setState(
+              () => _note = 'تعذّر البحث الآن (رمز ${response.statusCode}).');
+        }
+        return;
+      }
+      final data = jsonDecode(utf8.decode(response.bodyBytes)) as List<dynamic>;
+      const dist = Distance();
+      final items = <_StopItem>[];
+      for (final e in data) {
+        final pt = LatLng(
+          double.parse(e['lat'] as String),
+          double.parse(e['lon'] as String),
+        );
+        final sub = me == null
+            ? 'نتيجة بحث'
+            : 'نتيجة بحث • ${(dist.as(LengthUnit.Meter, me, pt) / 1000).toStringAsFixed(1)} كم';
+        items.add(_StopItem(e['display_name'] as String, pt, '', sub));
+      }
+      if (!mounted) return;
+      setState(() {
+        _items = items;
+        if (items.isEmpty) _note = 'لا توجد نتائج لهذا البحث.';
+      });
+    } catch (_) {
+      if (mounted) {
+        setState(() => _note = 'تعذّر البحث. تأكد من الاتصال بالإنترنت.');
+      }
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+      child: SafeArea(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.of(context).size.height * 0.75,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+                child: Text(
+                  'إضافة محطة على الطريق',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: TextField(
+                  controller: _q,
+                  textInputAction: TextInputAction.search,
+                  onSubmitted: (_) => _searchByName(),
+                  decoration: InputDecoration(
+                    hintText: 'ابحث عن مكان لإضافته كمحطة',
+                    prefixIcon: const Icon(Icons.search),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    isDense: true,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              SizedBox(
+                height: 42,
+                child: ListView(
+                  scrollDirection: Axis.horizontal,
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  children: [
+                    for (final c in kPoiCategories)
+                      Padding(
+                        padding: const EdgeInsetsDirectional.only(end: 6),
+                        child: ChoiceChip(
+                          avatar: Icon(c.icon, size: 18, color: c.color),
+                          label: Text(c.label),
+                          showCheckmark: false,
+                          selected: _catKey == c.key,
+                          selectedColor: scheme.primaryContainer,
+                          onSelected: (_) => _loadAlongRoute(c),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              if (_loading) const LinearProgressIndicator(),
+              if (_note != null)
+                Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Text(_note!),
+                ),
+              Flexible(
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: _items.length,
+                  itemBuilder: (ctx, i) {
+                    final it = _items[i];
+                    final cat = poiCategoryByKey(it.key);
+                    return ListTile(
+                      leading: Icon(cat?.icon ?? Icons.place, color: cat?.color),
+                      title: Text(it.name, maxLines: 2, overflow: TextOverflow.ellipsis),
+                      subtitle: Text(it.sub),
+                      onTap: () {
+                        Navigator.pop(context);
+                        widget.onPick(PlaceResult(name: it.name, point: it.point));
+                      },
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class MapScreen extends StatefulWidget {
   const MapScreen({super.key});
 
@@ -224,6 +540,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   static const String _kDestLon = 'dalilik_dest_lon';
   static const String _kDestName = 'dalilik_dest_name';
   static const String _kNav = 'dalilik_nav_active';
+  static const String _kStops = 'dalilik_stops';
   static const String _kSavedAt = 'dalilik_saved_at';
   static const String _kCamLat = 'dalilik_cam_lat';
   static const String _kCamLon = 'dalilik_cam_lon';
@@ -235,6 +552,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   bool _locating = false;
 
   bool _searching = false;
+  List<PlaceResult> _stops = [];
   String? _poiKey;
   List<Poi> _pois = [];
   bool _poiLoading = false;
@@ -347,6 +665,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         await prefs.remove(_kDestLon);
         await prefs.remove(_kDestName);
         await prefs.remove(_kNav);
+        await prefs.remove(_kStops);
       } else {
         await prefs.setDouble(_kDestLat, dest.latitude);
         await prefs.setDouble(_kDestLon, dest.longitude);
@@ -357,6 +676,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
           await prefs.remove(_kDestName);
         }
         await prefs.setBool(_kNav, _navigating);
+        await prefs.setString(
+          _kStops,
+          jsonEncode(_stops.map((st) => st.toJson()).toList()),
+        );
       }
       await prefs.setInt(_kSavedAt, DateTime.now().millisecondsSinceEpoch);
       try {
@@ -378,12 +701,23 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         await prefs.remove(_kDestLon);
         await prefs.remove(_kDestName);
         await prefs.remove(_kNav);
+        await prefs.remove(_kStops);
         return;
       }
       final lat = prefs.getDouble(_kDestLat);
       final lon = prefs.getDouble(_kDestLon);
       final name = prefs.getString(_kDestName);
       final wasNavigating = prefs.getBool(_kNav) ?? false;
+      final restoredStops = <PlaceResult>[];
+      final stopsJson = prefs.getString(_kStops);
+      if (stopsJson != null) {
+        try {
+          for (final e in jsonDecode(stopsJson) as List<dynamic>) {
+            final st = PlaceResult.fromJson(e as Map<String, dynamic>);
+            if (st != null) restoredStops.add(st);
+          }
+        } catch (_) {}
+      }
       final camLat = prefs.getDouble(_kCamLat);
       final camLon = prefs.getDouble(_kCamLon);
       final camZoom = prefs.getDouble(_kCamZoom);
@@ -400,6 +734,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       setState(() {
         _destination = LatLng(lat, lon);
         _destinationName = name;
+        _stops = restoredStops;
       });
       await _computeRoute(silent: wasNavigating);
       if (!mounted) return;
@@ -642,11 +977,11 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     _reroute();
   }
 
-  Future<void> _reroute() async {
+  Future<void> _reroute({bool announce = true, String? prefix}) async {
     _rerouting = true;
     _lastReroute = DateTime.now();
     _offRouteCount = 0;
-    _speak('جارٍ إعادة حساب المسار');
+    if (announce) _speak('جارٍ إعادة حساب المسار');
     final before = _routePoints;
     await _computeRoute(silent: true);
     _rerouting = false;
@@ -660,11 +995,95 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       _spokenStage = _stageFor(_distToNext);
     });
     final step = _steps[_nextStep];
+    final lead = prefix == null ? '' : '$prefix. ';
     if (step.type == 'arrive') {
-      _speak(step.instruction);
+      _speak('$lead${step.instruction}');
     } else {
-      _speak('بعد ${_spokenDistance(_distToNext)} ${step.instruction}');
+      _speak('$lead' 'بعد ${_spokenDistance(_distToNext)} ${step.instruction}');
     }
+  }
+
+  Future<void> _checkStopReached(LatLng here) async {
+    if (!_navigating || _stops.isEmpty || _rerouting || _routing) return;
+    const dist = Distance();
+    final stop = _stops.first;
+    if (dist.as(LengthUnit.Meter, here, stop.point) > 100) return;
+    setState(() => _stops = _stops.sublist(1));
+    _saveState();
+    final lead = _stops.isEmpty
+        ? 'وصلت إلى المحطة. نكمل إلى وجهتك'
+        : 'وصلت إلى المحطة. نكمل إلى المحطة التالية';
+    await _reroute(announce: false, prefix: lead);
+  }
+
+  Future<void> _addStop(PlaceResult place) async {
+    if (!mounted) return;
+    setState(() => _stops = [place, ..._stops]);
+    _saveState();
+    _msg('أُضيفت المحطة: ${place.name}');
+    if (_navigating) {
+      await _reroute(announce: false);
+    } else {
+      await _computeRoute();
+    }
+  }
+
+  Future<void> _cancelStop() async {
+    if (_stops.isEmpty) return;
+    setState(() => _stops = _stops.sublist(1));
+    _saveState();
+    if (_navigating) {
+      await _reroute(announce: false);
+    } else {
+      await _computeRoute(silent: true);
+    }
+  }
+
+  void _openStopSheet() {
+    if (_routePoints.length < 2) {
+      _msg('حدّد وجهة ومساراً أولاً، ثم أضف المحطة.');
+      return;
+    }
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => StopSheet(
+        route: _routePoints,
+        me: _myLocation,
+        onPick: _addStop,
+      ),
+    );
+  }
+
+  Widget _stopBanner() {
+    final scheme = Theme.of(context).colorScheme;
+    final st = _stops.first;
+    return Material(
+      elevation: 3,
+      color: scheme.tertiaryContainer,
+      borderRadius: BorderRadius.circular(12),
+      child: Padding(
+        padding: const EdgeInsetsDirectional.only(start: 12, end: 4),
+        child: Row(
+          children: [
+            const Icon(Icons.flag_circle, size: 20),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'المحطة التالية: ${st.name}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            IconButton(
+              icon: const Icon(Icons.close, size: 20),
+              tooltip: 'إلغاء المحطة',
+              onPressed: _cancelStop,
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Future<void> _locateMe() async {
@@ -878,6 +1297,20 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                   label: const Text('اجعله وجهتي'),
                 ),
               ),
+              if (_destination != null && _routePoints.length > 1) ...[
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      _addStop(PlaceResult(name: p.name, point: p.point));
+                    },
+                    icon: const Icon(Icons.add_location_alt),
+                    label: const Text('أضفه كمحطة على الطريق'),
+                  ),
+                ),
+              ],
             ],
           ),
         ),
@@ -947,6 +1380,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     setState(() {
       _destination = place.point;
       _destinationName = place.name;
+      _stops = [];
       _results = [];
       _resetRoute();
       _addToHistory(place);
@@ -960,6 +1394,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     setState(() {
       _destination = point;
       _destinationName = null;
+      _stops = [];
       _results = [];
       _resetRoute();
     });
@@ -971,6 +1406,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     setState(() {
       _destination = null;
       _destinationName = null;
+      _stops = [];
       _resetRoute();
     });
     _saveState();
@@ -986,7 +1422,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
     final steps = <NavStep>[];
     final legs = (route['legs'] as List<dynamic>?) ?? [];
-    for (final leg in legs) {
+    for (var li = 0; li < legs.length; li++) {
+      final leg = legs[li];
       final legSteps =
           ((leg as Map<String, dynamic>)['steps'] as List<dynamic>?) ?? [];
       for (final s in legSteps) {
@@ -999,7 +1436,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         final exit = (maneuver['exit'] as num?)?.toInt();
         steps.add(
           NavStep(
-            instruction: _arabicInstruction(type, modifier, name, exit),
+            instruction: (type == 'arrive' && li < legs.length - 1)
+                ? 'وصلت إلى المحطة'
+                : _arabicInstruction(type, modifier, name, exit),
             type: type,
             modifier: modifier,
             point: LatLng(
@@ -1038,14 +1477,17 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
     setState(() => _routing = true);
     try {
+      final allPoints = <LatLng>[from, ..._stops.map((st) => st.point), to];
+      final coordPath =
+          allPoints.map((pt) => '${pt.longitude},${pt.latitude}').join(';');
       final uri = Uri.https(
         'router.project-osrm.org',
-        '/route/v1/driving/${from.longitude},${from.latitude};${to.longitude},${to.latitude}',
+        '/route/v1/driving/$coordPath',
         {
           'overview': 'full',
           'geometries': 'geojson',
           'steps': 'true',
-          'alternatives': '3',
+          'alternatives': _stops.isEmpty ? '3' : 'false',
         },
       );
       final response = await http.get(
@@ -1156,6 +1598,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         });
         _maybeSpeak();
         _checkOffRoute(here, position.accuracy);
+        _checkStopReached(here);
         final h = position.heading;
         if (speed >= 1.5 && !h.isNaN && h >= 0 && h <= 360) {
           if (!_hasHeading) {
@@ -1591,6 +2034,23 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                     ),
                   ],
                 ),
+              if (_stops.isNotEmpty)
+                MarkerLayer(
+                  rotate: true,
+                  markers: [
+                    for (final st in _stops)
+                      Marker(
+                        point: st.point,
+                        width: 40,
+                        height: 40,
+                        child: const Icon(
+                          Icons.flag_circle,
+                          color: Color(0xFFEF6C00),
+                          size: 38,
+                        ),
+                      ),
+                  ],
+                ),
               if (_pois.isNotEmpty)
                 MarkerLayer(
                   rotate: true,
@@ -1650,6 +2110,17 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
               ],
             ),
           ),
+          if (_destination != null && _routePoints.length > 1)
+            Positioned(
+              right: 16,
+              bottom: 136,
+              child: FloatingActionButton.small(
+                heroTag: 'add_stop',
+                tooltip: 'إضافة محطة على الطريق',
+                onPressed: _openStopSheet,
+                child: const Icon(Icons.add_location_alt),
+              ),
+            ),
           Positioned(
             right: 16,
             bottom: 64,
@@ -1689,6 +2160,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                     const SizedBox(height: 8),
                     _destinationCard(),
                   ],
+                ],
+                if (_stops.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  _stopBanner(),
                 ],
               ],
             ),
