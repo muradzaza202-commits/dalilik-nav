@@ -213,6 +213,150 @@ const List<Color> kStopColors = [
   Color(0xFF6D4C41),
 ];
 
+const List<String> kOverpassMirrors = [
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+];
+
+class OverpassException implements Exception {
+  final String reason;
+
+  const OverpassException(this.reason);
+}
+
+Future<List<dynamic>> overpassElements(String query) async {
+  var lastReason = 'سبب غير معروف';
+  for (final url in kOverpassMirrors) {
+    try {
+      final response = await http.post(
+        Uri.parse(url),
+        headers: {'User-Agent': 'Dalilik/0.1 (Flutter navigation app)'},
+        body: {'data': query},
+      ).timeout(const Duration(seconds: 10));
+      if (response.statusCode != 200) {
+        lastReason = response.statusCode == 429 || response.statusCode == 504
+            ? 'الخادم مشغول (${response.statusCode})'
+            : 'رمز ${response.statusCode}';
+        continue;
+      }
+      final data = jsonDecode(utf8.decode(response.bodyBytes));
+      if (data is Map<String, dynamic> && data['elements'] is List) {
+        final list = data['elements'] as List<dynamic>;
+        final remark = (data['remark'] ?? '').toString();
+        if (list.isEmpty && remark.contains('runtime error')) {
+          lastReason = 'الخادم مشغول';
+          continue;
+        }
+        return list;
+      }
+      lastReason = 'ردّ غير مفهوم من الخادم';
+    } on TimeoutException {
+      lastReason = 'انتهت مهلة الخادم';
+    } catch (e) {
+      final t = e.toString();
+      lastReason = (t.contains('SocketException') || t.contains('host lookup'))
+          ? 'تعذّر الوصول إلى الخادم'
+          : 'خطأ في قراءة الردّ';
+    }
+  }
+  throw OverpassException(lastReason);
+}
+
+class RawPlace {
+  final String name;
+  final LatLng point;
+
+  const RawPlace(this.name, this.point);
+}
+
+List<RawPlace> parseOverpassPlaces(List<dynamic> elements, PoiCategory cat) {
+  final out = <RawPlace>[];
+  for (final e in elements) {
+    final m = e as Map<String, dynamic>;
+    double? lat = (m['lat'] as num?)?.toDouble();
+    double? lon = (m['lon'] as num?)?.toDouble();
+    final center = m['center'] as Map<String, dynamic>?;
+    if (lat == null && center != null) {
+      lat = (center['lat'] as num?)?.toDouble();
+      lon = (center['lon'] as num?)?.toDouble();
+    }
+    if (lat == null || lon == null) continue;
+    final tags = (m['tags'] as Map<String, dynamic>?) ?? {};
+    final rawName = (tags['name:ar'] ?? tags['name'] ?? '').toString();
+    out.add(RawPlace(rawName.isNotEmpty ? rawName : cat.label, LatLng(lat, lon)));
+  }
+  return out;
+}
+
+const Map<String, List<String>> kNominatimTerms = {
+  'fuel': ['fuel'],
+  'food': ['restaurant', 'cafe'],
+  'hotel': ['hotel'],
+  'parking': ['parking'],
+  'market': ['supermarket', 'marketplace'],
+  'health': ['hospital', 'pharmacy'],
+  'tourism': ['attraction', 'museum'],
+};
+
+Future<List<RawPlace>> nominatimPlaces(
+  PoiCategory cat,
+  double south,
+  double west,
+  double north,
+  double east,
+) async {
+  final terms = kNominatimTerms[cat.key] ?? [cat.label];
+  final out = <RawPlace>[];
+  var reached = false;
+  for (var t = 0; t < terms.length; t++) {
+    if (t > 0) await Future.delayed(const Duration(milliseconds: 1100));
+    try {
+      final response = await http.get(
+        Uri.https('nominatim.openstreetmap.org', '/search', {
+          'q': terms[t],
+          'format': 'jsonv2',
+          'limit': '40',
+          'bounded': '1',
+          'viewbox': '$west,$north,$east,$south',
+          'accept-language': 'ar',
+        }),
+        headers: {'User-Agent': 'Dalilik/0.1 (Flutter navigation app)'},
+      ).timeout(const Duration(seconds: 15));
+      if (response.statusCode != 200) continue;
+      final data = jsonDecode(utf8.decode(response.bodyBytes));
+      if (data is! List) continue;
+      reached = true;
+      for (final e in data) {
+        final m = e as Map<String, dynamic>;
+        final lat = double.tryParse((m['lat'] ?? '').toString());
+        final lon = double.tryParse((m['lon'] ?? '').toString());
+        if (lat == null || lon == null) continue;
+        final n = (m['name'] ?? '').toString();
+        out.add(RawPlace(n.isNotEmpty ? n : cat.label, LatLng(lat, lon)));
+      }
+    } catch (_) {}
+  }
+  if (!reached) {
+    throw const OverpassException('تعذّر الوصول إلى خوادم الأماكن');
+  }
+  return out;
+}
+
+Future<List<RawPlace>> fetchPlaces(
+  PoiCategory cat,
+  String overpassQuery,
+  double south,
+  double west,
+  double north,
+  double east,
+) async {
+  try {
+    return parseOverpassPlaces(await overpassElements(overpassQuery), cat);
+  } on OverpassException {
+    return nominatimPlaces(cat, south, west, north, east);
+  }
+}
+
 class _StopItem {
   final String name;
   final LatLng point;
@@ -285,7 +429,7 @@ class _StopSheetState extends State<StopSheet> {
       final d = dist.as(LengthUnit.Meter, r[i - 1], r[i]);
       acc += d;
       total += d;
-      if (acc >= 400) {
+      if (acc >= 1000) {
         pts.add(r[i]);
         acc = 0;
       }
@@ -295,6 +439,15 @@ class _StopSheetState extends State<StopSheet> {
     return pts;
   }
 
+  bool _nearRoute(LatLng p) {
+    for (final r in widget.route) {
+      final dx = r.latitude - p.latitude;
+      final dy = (r.longitude - p.longitude) * 0.84;
+      if (dx * dx + dy * dy <= 0.0065 * 0.0065) return true;
+    }
+    return false;
+  }
+
   Future<void> _loadAlongRoute(PoiCategory cat) async {
     if (_loading) return;
     final pts = _samples();
@@ -302,9 +455,23 @@ class _StopSheetState extends State<StopSheet> {
       setState(() => _note = 'لا يوجد مسار لعرض الأماكن عليه.');
       return;
     }
+    var south = pts.first.latitude;
+    var north = south;
+    var west = pts.first.longitude;
+    var east = west;
+    for (final p in pts) {
+      if (p.latitude < south) south = p.latitude;
+      if (p.latitude > north) north = p.latitude;
+      if (p.longitude < west) west = p.longitude;
+      if (p.longitude > east) east = p.longitude;
+    }
+    south -= 0.01;
+    north += 0.01;
+    west -= 0.01;
+    east += 0.01;
     final coords = pts.map((p) => '${p.latitude},${p.longitude}').join(',');
     final parts = cat.filters.map((f) => 'nwr$f(around:500,$coords);').join();
-    final query = '[out:json][timeout:25];($parts);out center 60;';
+    final query = '[out:json][timeout:18];($parts);out center 60;';
     setState(() {
       _catKey = cat.key;
       _loading = true;
@@ -312,42 +479,23 @@ class _StopSheetState extends State<StopSheet> {
       _items = [];
     });
     try {
-      final response = await http.post(
-        Uri.parse('https://overpass-api.de/api/interpreter'),
-        headers: {'User-Agent': 'Dalilik/0.1 (Flutter navigation app)'},
-        body: {'data': query},
-      ).timeout(const Duration(seconds: 30));
-      if (response.statusCode != 200) {
-        if (mounted) {
-          setState(() =>
-              _note = 'تعذّر تحميل الأماكن الآن (رمز ${response.statusCode}).');
-        }
-        return;
+      List<RawPlace> raw;
+      try {
+        raw = parseOverpassPlaces(await overpassElements(query), cat);
+      } on OverpassException {
+        raw = await nominatimPlaces(cat, south, west, north, east);
+        raw = raw.where((r) => _nearRoute(r.point)).toList();
       }
-      final data =
-          jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
-      final elements = (data['elements'] as List<dynamic>?) ?? [];
       const dist = Distance();
       final me = widget.me;
       final scored = <MapEntry<int, _StopItem>>[];
-      for (final e in elements) {
-        final m = e as Map<String, dynamic>;
-        double? lat = (m['lat'] as num?)?.toDouble();
-        double? lon = (m['lon'] as num?)?.toDouble();
-        final center = m['center'] as Map<String, dynamic>?;
-        if (lat == null && center != null) {
-          lat = (center['lat'] as num?)?.toDouble();
-          lon = (center['lon'] as num?)?.toDouble();
-        }
-        if (lat == null || lon == null) continue;
-        final tags = (m['tags'] as Map<String, dynamic>?) ?? {};
-        final rawName = (tags['name:ar'] ?? tags['name'] ?? '').toString();
-        final pt = LatLng(lat, lon);
+      for (final r in raw) {
+        final pt = r.point;
         var idx = 0;
         var best = double.infinity;
         for (var i = 0; i < pts.length; i++) {
-          final dx = pts[i].latitude - lat;
-          final dy = pts[i].longitude - lon;
+          final dx = pts[i].latitude - pt.latitude;
+          final dy = pts[i].longitude - pt.longitude;
           final d = dx * dx + dy * dy;
           if (d < best) {
             best = d;
@@ -357,10 +505,7 @@ class _StopSheetState extends State<StopSheet> {
         final sub = me == null
             ? cat.label
             : '${cat.label} • ${(dist.as(LengthUnit.Meter, me, pt) / 1000).toStringAsFixed(1)} كم';
-        scored.add(MapEntry(
-          idx,
-          _StopItem(rawName.isNotEmpty ? rawName : cat.label, pt, cat.key, sub),
-        ));
+        scored.add(MapEntry(idx, _StopItem(r.name, pt, cat.key, sub)));
       }
       scored.sort((a, b) => a.key.compareTo(b.key));
       if (!mounted) return;
@@ -370,9 +515,13 @@ class _StopSheetState extends State<StopSheet> {
           _note = 'لا توجد أماكن من هذا النوع مسجّلة قرب مسارك.';
         }
       });
+    } on OverpassException catch (e) {
+      if (mounted) {
+        setState(() => _note = 'تعذّر تحميل الأماكن (${e.reason}). حاول مرة أخرى بعد قليل.');
+      }
     } catch (_) {
       if (mounted) {
-        setState(() => _note = 'تعذّر تحميل الأماكن. تأكد من الاتصال بالإنترنت.');
+        setState(() => _note = 'حدث خطأ غير متوقع أثناء تحميل الأماكن.');
       }
     } finally {
       if (mounted) setState(() => _loading = false);
@@ -442,13 +591,13 @@ class _StopSheetState extends State<StopSheet> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final small = Theme.of(context).textTheme.bodySmall;
+    final small = Theme.of(context).textTheme.bodySmall?.copyWith(fontSize: 11);
     return Material(
-      elevation: 4,
-      color: scheme.surface,
-      borderRadius: BorderRadius.circular(12),
+      elevation: 3,
+      color: scheme.surface.withOpacity(0.95),
+      borderRadius: BorderRadius.circular(10),
       child: Padding(
-        padding: const EdgeInsets.all(8),
+        padding: const EdgeInsets.all(6),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -457,45 +606,58 @@ class _StopSheetState extends State<StopSheet> {
               children: [
                 Expanded(
                   child: SizedBox(
-                    height: 42,
+                    height: 36,
                     child: TextField(
                       controller: _q,
+                      style: const TextStyle(fontSize: 13),
                       textInputAction: TextInputAction.search,
                       onSubmitted: (_) => _searchByName(),
                       decoration: InputDecoration(
                         hintText: 'ابحث عن محطة بالاسم',
-                        prefixIcon: const Icon(Icons.search),
+                        hintStyle: const TextStyle(fontSize: 13),
+                        prefixIcon: const Icon(Icons.search, size: 18),
+                        prefixIconConstraints:
+                            const BoxConstraints(minWidth: 32, minHeight: 32),
                         isDense: true,
                         contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 8,
+                          horizontal: 8,
+                          vertical: 6,
                         ),
                         border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(10),
+                          borderRadius: BorderRadius.circular(8),
                         ),
                       ),
                     ),
                   ),
                 ),
                 IconButton(
-                  icon: const Icon(Icons.close),
+                  icon: const Icon(Icons.close, size: 18),
                   tooltip: 'إغلاق',
+                  visualDensity: VisualDensity.compact,
+                  padding: EdgeInsets.zero,
+                  constraints:
+                      const BoxConstraints(minWidth: 32, minHeight: 32),
                   onPressed: widget.onClose,
                 ),
               ],
             ),
-            const SizedBox(height: 6),
+            const SizedBox(height: 4),
             SizedBox(
-              height: 38,
+              height: 32,
               child: ListView(
                 scrollDirection: Axis.horizontal,
                 children: [
                   for (final c in kPoiCategories)
                     Padding(
-                      padding: const EdgeInsetsDirectional.only(end: 6),
+                      padding: const EdgeInsetsDirectional.only(end: 4),
                       child: ChoiceChip(
-                        avatar: Icon(c.icon, size: 18, color: c.color),
+                        avatar: Icon(c.icon, size: 16, color: c.color),
                         label: Text(c.label),
+                        labelStyle: const TextStyle(fontSize: 12),
+                        labelPadding: const EdgeInsets.symmetric(horizontal: 2),
+                        padding: const EdgeInsets.symmetric(horizontal: 2),
+                        visualDensity: VisualDensity.compact,
+                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                         showCheckmark: false,
                         selected: _catKey == c.key,
                         selectedColor: scheme.primaryContainer,
@@ -507,18 +669,18 @@ class _StopSheetState extends State<StopSheet> {
             ),
             if (_loading)
               const Padding(
-                padding: EdgeInsets.only(top: 6),
+                padding: EdgeInsets.only(top: 4),
                 child: LinearProgressIndicator(),
               ),
             if (_note != null)
               Padding(
-                padding: const EdgeInsets.only(top: 6),
+                padding: const EdgeInsets.only(top: 4),
                 child: Text(_note!, style: small),
               ),
             if (_items.isNotEmpty) ...[
-              const SizedBox(height: 6),
+              const SizedBox(height: 4),
               SizedBox(
-                height: 84,
+                height: 50,
                 child: ListView.builder(
                   scrollDirection: Axis.horizontal,
                   itemCount: _items.length,
@@ -526,23 +688,26 @@ class _StopSheetState extends State<StopSheet> {
                     final it = _items[i];
                     final cat = poiCategoryByKey(it.key);
                     return Padding(
-                      padding: const EdgeInsetsDirectional.only(end: 8),
+                      padding: const EdgeInsetsDirectional.only(end: 6),
                       child: SizedBox(
-                        width: 185,
+                        width: 190,
                         child: Card(
                           margin: EdgeInsets.zero,
                           child: InkWell(
-                            borderRadius: BorderRadius.circular(12),
+                            borderRadius: BorderRadius.circular(10),
                             onTap: () => widget.onPick(
                               PlaceResult(name: it.name, point: it.point),
                             ),
                             child: Padding(
-                              padding: const EdgeInsets.all(8),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 6,
+                                vertical: 4,
+                              ),
                               child: Row(
                                 children: [
                                   Icon(cat?.icon ?? Icons.place,
-                                      color: cat?.color),
-                                  const SizedBox(width: 8),
+                                      size: 20, color: cat?.color),
+                                  const SizedBox(width: 6),
                                   Expanded(
                                     child: Column(
                                       mainAxisAlignment:
@@ -552,10 +717,11 @@ class _StopSheetState extends State<StopSheet> {
                                       children: [
                                         Text(
                                           it.name,
-                                          maxLines: 2,
+                                          maxLines: 1,
                                           overflow: TextOverflow.ellipsis,
                                           style: small?.copyWith(
                                             fontWeight: FontWeight.bold,
+                                            fontSize: 12,
                                           ),
                                         ),
                                         Text(
@@ -619,6 +785,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   bool _searching = false;
   List<PlaceResult> _stops = [];
   bool _stopPanelOpen = false;
+  final Map<String, int> _stopColorMap = {};
+  int _stopSeed = 0;
   String? _poiKey;
   List<Poi> _pois = [];
   bool _poiLoading = false;
@@ -1116,28 +1284,40 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     setState(() => _stopPanelOpen = !_stopPanelOpen);
   }
 
+  Color _stopColor(PlaceResult st) {
+    final key = '${st.point.latitude},${st.point.longitude}';
+    final idx = _stopColorMap.putIfAbsent(
+      key,
+      () => _stopSeed++ % kStopColors.length,
+    );
+    return kStopColors[idx];
+  }
+
   Widget _stopBanner() {
     final st = _stops.first;
     return Material(
       elevation: 3,
-      color: kStopColors[0],
-      borderRadius: BorderRadius.circular(12),
+      color: _stopColor(st),
+      borderRadius: BorderRadius.circular(10),
       child: Padding(
-        padding: const EdgeInsetsDirectional.only(start: 12, end: 4),
+        padding: const EdgeInsetsDirectional.only(start: 8, end: 2),
         child: Row(
           children: [
-            const Icon(Icons.flag_circle, size: 20, color: Colors.white),
-            const SizedBox(width: 8),
+            const Icon(Icons.flag_circle, size: 18, color: Colors.white),
+            const SizedBox(width: 6),
             Expanded(
               child: Text(
                 'المحطة التالية: ${st.name}',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(color: Colors.white),
+                style: const TextStyle(color: Colors.white, fontSize: 12),
               ),
             ),
             IconButton(
-              icon: const Icon(Icons.close, size: 20, color: Colors.white),
+              icon: const Icon(Icons.close, size: 18, color: Colors.white),
+              visualDensity: VisualDensity.compact,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
               tooltip: 'إلغاء المحطة',
               onPressed: _cancelStop,
             ),
@@ -1265,51 +1445,33 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     final b = cam.visibleBounds;
     final box = '${b.south},${b.west},${b.north},${b.east}';
     final parts = cat.filters.map((f) => 'nwr$f($box);').join();
-    final query = '[out:json][timeout:20];($parts);out center 80;';
+    final query = '[out:json][timeout:18];($parts);out center 80;';
     setState(() {
       _poiKey = key;
       _pois = [];
       _poiLoading = true;
     });
     try {
-      final response = await http.post(
-        Uri.parse('https://overpass-api.de/api/interpreter'),
-        headers: {'User-Agent': 'Dalilik/0.1 (Flutter navigation app)'},
-        body: {'data': query},
-      ).timeout(const Duration(seconds: 25));
-      if (response.statusCode != 200) {
-        _msg('تعذّر تحميل الأماكن الآن (رمز ${response.statusCode}). حاول بعد قليل.');
-        return;
-      }
-      final data =
-          jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
-      final elements = (data['elements'] as List<dynamic>?) ?? [];
-      final list = <Poi>[];
-      for (final e in elements) {
-        final m = e as Map<String, dynamic>;
-        double? lat = (m['lat'] as num?)?.toDouble();
-        double? lon = (m['lon'] as num?)?.toDouble();
-        final center = m['center'] as Map<String, dynamic>?;
-        if (lat == null && center != null) {
-          lat = (center['lat'] as num?)?.toDouble();
-          lon = (center['lon'] as num?)?.toDouble();
-        }
-        if (lat == null || lon == null) continue;
-        final tags = (m['tags'] as Map<String, dynamic>?) ?? {};
-        final rawName = (tags['name:ar'] ?? tags['name'] ?? '').toString();
-        list.add(Poi(
-          name: rawName.isNotEmpty ? rawName : cat.label,
-          point: LatLng(lat, lon),
-          key: key,
-        ));
-      }
+      final raw = await fetchPlaces(
+        cat,
+        query,
+        b.south,
+        b.west,
+        b.north,
+        b.east,
+      );
+      final list = raw
+          .map((r) => Poi(name: r.name, point: r.point, key: key))
+          .toList();
       if (!mounted) return;
       setState(() => _pois = list);
       if (list.isEmpty) {
         _msg('لا توجد أماكن من هذا النوع مسجّلة في هذه المنطقة.');
       }
+    } on OverpassException catch (e) {
+      _msg('تعذّر تحميل الأماكن (${e.reason}). حاول مرة أخرى بعد قليل.');
     } catch (_) {
-      _msg('تعذّر تحميل الأماكن. تأكد من الاتصال بالإنترنت وحاول مرة أخرى.');
+      _msg('حدث خطأ غير متوقع أثناء تحميل الأماكن.');
     } finally {
       if (mounted) setState(() => _poiLoading = false);
     }
@@ -2033,6 +2195,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      resizeToAvoidBottomInset: false,
       appBar: AppBar(
         title: const Text('دليلك'),
         centerTitle: true,
@@ -2107,7 +2270,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                         height: 40,
                         child: Icon(
                           Icons.flag_circle,
-                          color: kStopColors[i % kStopColors.length],
+                          color: _stopColor(_stops[i]),
                           size: 38,
                         ),
                       ),
@@ -2224,17 +2387,29 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                   ],
                 ],
                 if (_stops.isNotEmpty) ...[
-                  const SizedBox(height: 8),
-                  _stopBanner(),
+                  const SizedBox(height: 6),
+                  Align(
+                    alignment: Alignment.topLeft,
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 275),
+                      child: _stopBanner(),
+                    ),
+                  ),
                 ],
                 if (_stopPanelOpen && _routePoints.length > 1) ...[
-                  const SizedBox(height: 8),
-                  StopSheet(
-                    key: const ValueKey('stop_panel'),
-                    route: _routePoints,
-                    me: _myLocation,
-                    onPick: _addStop,
-                    onClose: () => setState(() => _stopPanelOpen = false),
+                  const SizedBox(height: 6),
+                  Align(
+                    alignment: Alignment.topLeft,
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 275),
+                      child: StopSheet(
+                        key: const ValueKey('stop_panel'),
+                        route: _routePoints,
+                        me: _myLocation,
+                        onPick: _addStop,
+                        onClose: () => setState(() => _stopPanelOpen = false),
+                      ),
+                    ),
                   ),
                 ],
               ],
