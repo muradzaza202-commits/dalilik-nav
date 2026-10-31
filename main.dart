@@ -213,6 +213,56 @@ const List<Color> kStopColors = [
   Color(0xFF6D4C41),
 ];
 
+const List<String> kOverpassMirrors = [
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter',
+];
+
+class OverpassException implements Exception {
+  final String reason;
+
+  const OverpassException(this.reason);
+}
+
+Future<List<dynamic>> overpassElements(String query) async {
+  var lastReason = 'سبب غير معروف';
+  for (final url in kOverpassMirrors) {
+    try {
+      final response = await http.post(
+        Uri.parse(url),
+        headers: {'User-Agent': 'Dalilik/0.1 (Flutter navigation app)'},
+        body: {'data': query},
+      ).timeout(const Duration(seconds: 20));
+      if (response.statusCode != 200) {
+        lastReason = response.statusCode == 429 || response.statusCode == 504
+            ? 'الخادم مشغول (${response.statusCode})'
+            : 'رمز ${response.statusCode}';
+        continue;
+      }
+      final data = jsonDecode(utf8.decode(response.bodyBytes));
+      if (data is Map<String, dynamic> && data['elements'] is List) {
+        final list = data['elements'] as List<dynamic>;
+        final remark = (data['remark'] ?? '').toString();
+        if (list.isEmpty && remark.contains('runtime error')) {
+          lastReason = 'الخادم مشغول';
+          continue;
+        }
+        return list;
+      }
+      lastReason = 'ردّ غير مفهوم من الخادم';
+    } on TimeoutException {
+      lastReason = 'انتهت مهلة الخادم';
+    } catch (e) {
+      final t = e.toString();
+      lastReason = (t.contains('SocketException') || t.contains('host lookup'))
+          ? 'تعذّر الوصول إلى الخادم'
+          : 'خطأ في قراءة الردّ';
+    }
+  }
+  throw OverpassException(lastReason);
+}
+
 class _StopItem {
   final String name;
   final LatLng point;
@@ -285,7 +335,7 @@ class _StopSheetState extends State<StopSheet> {
       final d = dist.as(LengthUnit.Meter, r[i - 1], r[i]);
       acc += d;
       total += d;
-      if (acc >= 400) {
+      if (acc >= 1000) {
         pts.add(r[i]);
         acc = 0;
       }
@@ -304,7 +354,7 @@ class _StopSheetState extends State<StopSheet> {
     }
     final coords = pts.map((p) => '${p.latitude},${p.longitude}').join(',');
     final parts = cat.filters.map((f) => 'nwr$f(around:500,$coords);').join();
-    final query = '[out:json][timeout:25];($parts);out center 60;';
+    final query = '[out:json][timeout:18];($parts);out center 60;';
     setState(() {
       _catKey = cat.key;
       _loading = true;
@@ -312,21 +362,7 @@ class _StopSheetState extends State<StopSheet> {
       _items = [];
     });
     try {
-      final response = await http.post(
-        Uri.parse('https://overpass-api.de/api/interpreter'),
-        headers: {'User-Agent': 'Dalilik/0.1 (Flutter navigation app)'},
-        body: {'data': query},
-      ).timeout(const Duration(seconds: 30));
-      if (response.statusCode != 200) {
-        if (mounted) {
-          setState(() =>
-              _note = 'تعذّر تحميل الأماكن الآن (رمز ${response.statusCode}).');
-        }
-        return;
-      }
-      final data =
-          jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
-      final elements = (data['elements'] as List<dynamic>?) ?? [];
+      final elements = await overpassElements(query);
       const dist = Distance();
       final me = widget.me;
       final scored = <MapEntry<int, _StopItem>>[];
@@ -370,9 +406,13 @@ class _StopSheetState extends State<StopSheet> {
           _note = 'لا توجد أماكن من هذا النوع مسجّلة قرب مسارك.';
         }
       });
+    } on OverpassException catch (e) {
+      if (mounted) {
+        setState(() => _note = 'تعذّر تحميل الأماكن (${e.reason}). حاول مرة أخرى بعد قليل.');
+      }
     } catch (_) {
       if (mounted) {
-        setState(() => _note = 'تعذّر تحميل الأماكن. تأكد من الاتصال بالإنترنت.');
+        setState(() => _note = 'حدث خطأ غير متوقع أثناء تحميل الأماكن.');
       }
     } finally {
       if (mounted) setState(() => _loading = false);
@@ -1296,25 +1336,14 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     final b = cam.visibleBounds;
     final box = '${b.south},${b.west},${b.north},${b.east}';
     final parts = cat.filters.map((f) => 'nwr$f($box);').join();
-    final query = '[out:json][timeout:20];($parts);out center 80;';
+    final query = '[out:json][timeout:18];($parts);out center 80;';
     setState(() {
       _poiKey = key;
       _pois = [];
       _poiLoading = true;
     });
     try {
-      final response = await http.post(
-        Uri.parse('https://overpass-api.de/api/interpreter'),
-        headers: {'User-Agent': 'Dalilik/0.1 (Flutter navigation app)'},
-        body: {'data': query},
-      ).timeout(const Duration(seconds: 25));
-      if (response.statusCode != 200) {
-        _msg('تعذّر تحميل الأماكن الآن (رمز ${response.statusCode}). حاول بعد قليل.');
-        return;
-      }
-      final data =
-          jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
-      final elements = (data['elements'] as List<dynamic>?) ?? [];
+      final elements = await overpassElements(query);
       final list = <Poi>[];
       for (final e in elements) {
         final m = e as Map<String, dynamic>;
@@ -1339,8 +1368,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       if (list.isEmpty) {
         _msg('لا توجد أماكن من هذا النوع مسجّلة في هذه المنطقة.');
       }
+    } on OverpassException catch (e) {
+      _msg('تعذّر تحميل الأماكن (${e.reason}). حاول مرة أخرى بعد قليل.');
     } catch (_) {
-      _msg('تعذّر تحميل الأماكن. تأكد من الاتصال بالإنترنت وحاول مرة أخرى.');
+      _msg('حدث خطأ غير متوقع أثناء تحميل الأماكن.');
     } finally {
       if (mounted) setState(() => _poiLoading = false);
     }
