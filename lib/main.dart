@@ -215,6 +215,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   double? _speedKmh;
   int _nextStep = 0;
   double _distToNext = 0;
+  double _heading = 0;
+  bool _hasHeading = false;
 
   final FlutterTts _tts = FlutterTts();
   bool _ttsReady = false;
@@ -896,6 +898,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       _spokenStep = -1;
       _spokenStage = 0;
       _offRouteCount = 0;
+      _heading = 0;
+      _hasHeading = false;
       final here = _myLocation;
       if (here != null) {
         _updateProgress(here);
@@ -930,11 +934,26 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         });
         _maybeSpeak();
         _checkOffRoute(here, position.accuracy);
+        final h = position.heading;
+        if (speed >= 1.5 && !h.isNaN && h >= 0 && h <= 360) {
+          if (!_hasHeading) {
+            _heading = h;
+            _hasHeading = true;
+          } else {
+            final diff = ((h - _heading + 540) % 360) - 180;
+            _heading = (_heading + diff * 0.4 + 360) % 360;
+          }
+        }
         final zoom = _controller.camera.zoom;
         final z = zoom < 16 ? 17.0 : zoom;
         final scale = 1 << z.round();
         final shift = 60 * 360 * 0.85 / (256 * scale);
-        _controller.move(LatLng(here.latitude + shift, here.longitude), z);
+        if (_hasHeading) {
+          final target = const Distance().offset(here, shift * 111320, _heading);
+          _controller.moveAndRotate(target, z, -_heading);
+        } else {
+          _controller.move(LatLng(here.latitude + shift, here.longitude), z);
+        }
       },
       onError: (_) {
         _msg('تعذّرت متابعة موقعك. تأكد من تفعيل GPS.');
@@ -954,7 +973,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       _spokenStep = -1;
       _spokenStage = 0;
       _offRouteCount = 0;
+      _heading = 0;
+      _hasHeading = false;
     });
+    _controller.rotate(0);
     _saveState();
   }
 
@@ -1328,6 +1350,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                 ),
               if (_myLocation != null)
                 MarkerLayer(
+                  rotate: true,
                   markers: [
                     Marker(
                       point: _myLocation!,
@@ -1348,6 +1371,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                 ),
               if (_destination != null)
                 MarkerLayer(
+                  rotate: true,
                   markers: [
                     Marker(
                       point: _destination!,
