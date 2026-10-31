@@ -442,13 +442,13 @@ class _StopSheetState extends State<StopSheet> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final small = Theme.of(context).textTheme.bodySmall;
+    final small = Theme.of(context).textTheme.bodySmall?.copyWith(fontSize: 11);
     return Material(
-      elevation: 4,
-      color: scheme.surface,
-      borderRadius: BorderRadius.circular(12),
+      elevation: 3,
+      color: scheme.surface.withOpacity(0.95),
+      borderRadius: BorderRadius.circular(10),
       child: Padding(
-        padding: const EdgeInsets.all(8),
+        padding: const EdgeInsets.all(6),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -457,45 +457,58 @@ class _StopSheetState extends State<StopSheet> {
               children: [
                 Expanded(
                   child: SizedBox(
-                    height: 42,
+                    height: 36,
                     child: TextField(
                       controller: _q,
+                      style: const TextStyle(fontSize: 13),
                       textInputAction: TextInputAction.search,
                       onSubmitted: (_) => _searchByName(),
                       decoration: InputDecoration(
                         hintText: 'ابحث عن محطة بالاسم',
-                        prefixIcon: const Icon(Icons.search),
+                        hintStyle: const TextStyle(fontSize: 13),
+                        prefixIcon: const Icon(Icons.search, size: 18),
+                        prefixIconConstraints:
+                            const BoxConstraints(minWidth: 32, minHeight: 32),
                         isDense: true,
                         contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 8,
+                          horizontal: 8,
+                          vertical: 6,
                         ),
                         border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(10),
+                          borderRadius: BorderRadius.circular(8),
                         ),
                       ),
                     ),
                   ),
                 ),
                 IconButton(
-                  icon: const Icon(Icons.close),
+                  icon: const Icon(Icons.close, size: 18),
                   tooltip: 'إغلاق',
+                  visualDensity: VisualDensity.compact,
+                  padding: EdgeInsets.zero,
+                  constraints:
+                      const BoxConstraints(minWidth: 32, minHeight: 32),
                   onPressed: widget.onClose,
                 ),
               ],
             ),
-            const SizedBox(height: 6),
+            const SizedBox(height: 4),
             SizedBox(
-              height: 38,
+              height: 32,
               child: ListView(
                 scrollDirection: Axis.horizontal,
                 children: [
                   for (final c in kPoiCategories)
                     Padding(
-                      padding: const EdgeInsetsDirectional.only(end: 6),
+                      padding: const EdgeInsetsDirectional.only(end: 4),
                       child: ChoiceChip(
-                        avatar: Icon(c.icon, size: 18, color: c.color),
+                        avatar: Icon(c.icon, size: 16, color: c.color),
                         label: Text(c.label),
+                        labelStyle: const TextStyle(fontSize: 12),
+                        labelPadding: const EdgeInsets.symmetric(horizontal: 2),
+                        padding: const EdgeInsets.symmetric(horizontal: 2),
+                        visualDensity: VisualDensity.compact,
+                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                         showCheckmark: false,
                         selected: _catKey == c.key,
                         selectedColor: scheme.primaryContainer,
@@ -507,18 +520,18 @@ class _StopSheetState extends State<StopSheet> {
             ),
             if (_loading)
               const Padding(
-                padding: EdgeInsets.only(top: 6),
+                padding: EdgeInsets.only(top: 4),
                 child: LinearProgressIndicator(),
               ),
             if (_note != null)
               Padding(
-                padding: const EdgeInsets.only(top: 6),
+                padding: const EdgeInsets.only(top: 4),
                 child: Text(_note!, style: small),
               ),
             if (_items.isNotEmpty) ...[
-              const SizedBox(height: 6),
+              const SizedBox(height: 4),
               SizedBox(
-                height: 84,
+                height: 50,
                 child: ListView.builder(
                   scrollDirection: Axis.horizontal,
                   itemCount: _items.length,
@@ -526,23 +539,26 @@ class _StopSheetState extends State<StopSheet> {
                     final it = _items[i];
                     final cat = poiCategoryByKey(it.key);
                     return Padding(
-                      padding: const EdgeInsetsDirectional.only(end: 8),
+                      padding: const EdgeInsetsDirectional.only(end: 6),
                       child: SizedBox(
-                        width: 185,
+                        width: 190,
                         child: Card(
                           margin: EdgeInsets.zero,
                           child: InkWell(
-                            borderRadius: BorderRadius.circular(12),
+                            borderRadius: BorderRadius.circular(10),
                             onTap: () => widget.onPick(
                               PlaceResult(name: it.name, point: it.point),
                             ),
                             child: Padding(
-                              padding: const EdgeInsets.all(8),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 6,
+                                vertical: 4,
+                              ),
                               child: Row(
                                 children: [
                                   Icon(cat?.icon ?? Icons.place,
-                                      color: cat?.color),
-                                  const SizedBox(width: 8),
+                                      size: 20, color: cat?.color),
+                                  const SizedBox(width: 6),
                                   Expanded(
                                     child: Column(
                                       mainAxisAlignment:
@@ -552,10 +568,11 @@ class _StopSheetState extends State<StopSheet> {
                                       children: [
                                         Text(
                                           it.name,
-                                          maxLines: 2,
+                                          maxLines: 1,
                                           overflow: TextOverflow.ellipsis,
                                           style: small?.copyWith(
                                             fontWeight: FontWeight.bold,
+                                            fontSize: 12,
                                           ),
                                         ),
                                         Text(
@@ -1132,23 +1149,26 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     return Material(
       elevation: 3,
       color: _stopColor(st),
-      borderRadius: BorderRadius.circular(12),
+      borderRadius: BorderRadius.circular(10),
       child: Padding(
-        padding: const EdgeInsetsDirectional.only(start: 12, end: 4),
+        padding: const EdgeInsetsDirectional.only(start: 8, end: 2),
         child: Row(
           children: [
-            const Icon(Icons.flag_circle, size: 20, color: Colors.white),
-            const SizedBox(width: 8),
+            const Icon(Icons.flag_circle, size: 18, color: Colors.white),
+            const SizedBox(width: 6),
             Expanded(
               child: Text(
                 'المحطة التالية: ${st.name}',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(color: Colors.white),
+                style: const TextStyle(color: Colors.white, fontSize: 12),
               ),
             ),
             IconButton(
-              icon: const Icon(Icons.close, size: 20, color: Colors.white),
+              icon: const Icon(Icons.close, size: 18, color: Colors.white),
+              visualDensity: VisualDensity.compact,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
               tooltip: 'إلغاء المحطة',
               onPressed: _cancelStop,
             ),
@@ -2044,6 +2064,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      resizeToAvoidBottomInset: false,
       appBar: AppBar(
         title: const Text('دليلك'),
         centerTitle: true,
@@ -2235,17 +2256,29 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                   ],
                 ],
                 if (_stops.isNotEmpty) ...[
-                  const SizedBox(height: 8),
-                  _stopBanner(),
+                  const SizedBox(height: 6),
+                  Align(
+                    alignment: Alignment.topLeft,
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 275),
+                      child: _stopBanner(),
+                    ),
+                  ),
                 ],
                 if (_stopPanelOpen && _routePoints.length > 1) ...[
-                  const SizedBox(height: 8),
-                  StopSheet(
-                    key: const ValueKey('stop_panel'),
-                    route: _routePoints,
-                    me: _myLocation,
-                    onPick: _addStop,
-                    onClose: () => setState(() => _stopPanelOpen = false),
+                  const SizedBox(height: 6),
+                  Align(
+                    alignment: Alignment.topLeft,
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 275),
+                      child: StopSheet(
+                        key: const ValueKey('stop_panel'),
+                        route: _routePoints,
+                        me: _myLocation,
+                        onPick: _addStop,
+                        onClose: () => setState(() => _stopPanelOpen = false),
+                      ),
+                    ),
                   ),
                 ],
               ],
