@@ -204,6 +204,15 @@ const List<PoiCategory> kPoiCategories = [
       ['["tourism"~"^(attraction|museum|viewpoint|gallery)\$"]']),
 ];
 
+const List<Color> kStopColors = [
+  Color(0xFFEF6C00),
+  Color(0xFF8E24AA),
+  Color(0xFF00897B),
+  Color(0xFFD81B60),
+  Color(0xFF3949AB),
+  Color(0xFF6D4C41),
+];
+
 class _StopItem {
   final String name;
   final LatLng point;
@@ -224,12 +233,14 @@ class StopSheet extends StatefulWidget {
   final List<LatLng> route;
   final LatLng? me;
   final void Function(PlaceResult place) onPick;
+  final VoidCallback onClose;
 
   const StopSheet({
     super.key,
     required this.route,
     required this.me,
     required this.onPick,
+    required this.onClose,
   });
 
   @override
@@ -431,89 +442,143 @@ class _StopSheetState extends State<StopSheet> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    return Padding(
-      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
-      child: SafeArea(
-        child: ConstrainedBox(
-          constraints: BoxConstraints(
-            maxHeight: MediaQuery.of(context).size.height * 0.75,
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-                child: Text(
-                  'إضافة محطة على الطريق',
-                  style: Theme.of(context).textTheme.titleMedium,
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: TextField(
-                  controller: _q,
-                  textInputAction: TextInputAction.search,
-                  onSubmitted: (_) => _searchByName(),
-                  decoration: InputDecoration(
-                    hintText: 'ابحث عن مكان لإضافته كمحطة',
-                    prefixIcon: const Icon(Icons.search),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    isDense: true,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 8),
-              SizedBox(
-                height: 42,
-                child: ListView(
-                  scrollDirection: Axis.horizontal,
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  children: [
-                    for (final c in kPoiCategories)
-                      Padding(
-                        padding: const EdgeInsetsDirectional.only(end: 6),
-                        child: ChoiceChip(
-                          avatar: Icon(c.icon, size: 18, color: c.color),
-                          label: Text(c.label),
-                          showCheckmark: false,
-                          selected: _catKey == c.key,
-                          selectedColor: scheme.primaryContainer,
-                          onSelected: (_) => _loadAlongRoute(c),
+    final small = Theme.of(context).textTheme.bodySmall;
+    return Material(
+      elevation: 4,
+      color: scheme.surface,
+      borderRadius: BorderRadius.circular(12),
+      child: Padding(
+        padding: const EdgeInsets.all(8),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: SizedBox(
+                    height: 42,
+                    child: TextField(
+                      controller: _q,
+                      textInputAction: TextInputAction.search,
+                      onSubmitted: (_) => _searchByName(),
+                      decoration: InputDecoration(
+                        hintText: 'ابحث عن محطة بالاسم',
+                        prefixIcon: const Icon(Icons.search),
+                        isDense: true,
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 8,
+                        ),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(10),
                         ),
                       ),
-                  ],
+                    ),
+                  ),
                 ),
+                IconButton(
+                  icon: const Icon(Icons.close),
+                  tooltip: 'إغلاق',
+                  onPressed: widget.onClose,
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            SizedBox(
+              height: 38,
+              child: ListView(
+                scrollDirection: Axis.horizontal,
+                children: [
+                  for (final c in kPoiCategories)
+                    Padding(
+                      padding: const EdgeInsetsDirectional.only(end: 6),
+                      child: ChoiceChip(
+                        avatar: Icon(c.icon, size: 18, color: c.color),
+                        label: Text(c.label),
+                        showCheckmark: false,
+                        selected: _catKey == c.key,
+                        selectedColor: scheme.primaryContainer,
+                        onSelected: (_) => _loadAlongRoute(c),
+                      ),
+                    ),
+                ],
               ),
-              if (_loading) const LinearProgressIndicator(),
-              if (_note != null)
-                Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Text(_note!),
-                ),
-              Flexible(
+            ),
+            if (_loading)
+              const Padding(
+                padding: EdgeInsets.only(top: 6),
+                child: LinearProgressIndicator(),
+              ),
+            if (_note != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(_note!, style: small),
+              ),
+            if (_items.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              SizedBox(
+                height: 84,
                 child: ListView.builder(
-                  shrinkWrap: true,
+                  scrollDirection: Axis.horizontal,
                   itemCount: _items.length,
                   itemBuilder: (ctx, i) {
                     final it = _items[i];
                     final cat = poiCategoryByKey(it.key);
-                    return ListTile(
-                      leading: Icon(cat?.icon ?? Icons.place, color: cat?.color),
-                      title: Text(it.name, maxLines: 2, overflow: TextOverflow.ellipsis),
-                      subtitle: Text(it.sub),
-                      onTap: () {
-                        Navigator.pop(context);
-                        widget.onPick(PlaceResult(name: it.name, point: it.point));
-                      },
+                    return Padding(
+                      padding: const EdgeInsetsDirectional.only(end: 8),
+                      child: SizedBox(
+                        width: 185,
+                        child: Card(
+                          margin: EdgeInsets.zero,
+                          child: InkWell(
+                            borderRadius: BorderRadius.circular(12),
+                            onTap: () => widget.onPick(
+                              PlaceResult(name: it.name, point: it.point),
+                            ),
+                            child: Padding(
+                              padding: const EdgeInsets.all(8),
+                              child: Row(
+                                children: [
+                                  Icon(cat?.icon ?? Icons.place,
+                                      color: cat?.color),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: Column(
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.center,
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          it.name,
+                                          maxLines: 2,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: small?.copyWith(
+                                            fontWeight: FontWeight.bold,
+                                          ),
+                                        ),
+                                        Text(
+                                          it.sub,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: small,
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
                     );
                   },
                 ),
               ),
             ],
-          ),
+          ],
         ),
       ),
     );
@@ -553,6 +618,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
   bool _searching = false;
   List<PlaceResult> _stops = [];
+  bool _stopPanelOpen = false;
   String? _poiKey;
   List<Poi> _pois = [];
   bool _poiLoading = false;
@@ -1018,7 +1084,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
   Future<void> _addStop(PlaceResult place) async {
     if (!mounted) return;
-    setState(() => _stops = [place, ..._stops]);
+    setState(() {
+      _stops = [place, ..._stops];
+      _stopPanelOpen = false;
+    });
     _saveState();
     _msg('أُضيفت المحطة: ${place.name}');
     if (_navigating) {
@@ -1044,39 +1113,31 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       _msg('حدّد وجهة ومساراً أولاً، ثم أضف المحطة.');
       return;
     }
-    showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      builder: (ctx) => StopSheet(
-        route: _routePoints,
-        me: _myLocation,
-        onPick: _addStop,
-      ),
-    );
+    setState(() => _stopPanelOpen = !_stopPanelOpen);
   }
 
   Widget _stopBanner() {
-    final scheme = Theme.of(context).colorScheme;
     final st = _stops.first;
     return Material(
       elevation: 3,
-      color: scheme.tertiaryContainer,
+      color: kStopColors[0],
       borderRadius: BorderRadius.circular(12),
       child: Padding(
         padding: const EdgeInsetsDirectional.only(start: 12, end: 4),
         child: Row(
           children: [
-            const Icon(Icons.flag_circle, size: 20),
+            const Icon(Icons.flag_circle, size: 20, color: Colors.white),
             const SizedBox(width: 8),
             Expanded(
               child: Text(
                 'المحطة التالية: ${st.name}',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
+                style: const TextStyle(color: Colors.white),
               ),
             ),
             IconButton(
-              icon: const Icon(Icons.close, size: 20),
+              icon: const Icon(Icons.close, size: 20, color: Colors.white),
               tooltip: 'إلغاء المحطة',
               onPressed: _cancelStop,
             ),
@@ -1407,6 +1468,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       _destination = null;
       _destinationName = null;
       _stops = [];
+      _stopPanelOpen = false;
       _resetRoute();
     });
     _saveState();
@@ -2038,14 +2100,14 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                 MarkerLayer(
                   rotate: true,
                   markers: [
-                    for (final st in _stops)
+                    for (var i = 0; i < _stops.length; i++)
                       Marker(
-                        point: st.point,
+                        point: _stops[i].point,
                         width: 40,
                         height: 40,
-                        child: const Icon(
+                        child: Icon(
                           Icons.flag_circle,
-                          color: Color(0xFFEF6C00),
+                          color: kStopColors[i % kStopColors.length],
                           size: 38,
                         ),
                       ),
@@ -2164,6 +2226,16 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                 if (_stops.isNotEmpty) ...[
                   const SizedBox(height: 8),
                   _stopBanner(),
+                ],
+                if (_stopPanelOpen && _routePoints.length > 1) ...[
+                  const SizedBox(height: 8),
+                  StopSheet(
+                    key: const ValueKey('stop_panel'),
+                    route: _routePoints,
+                    me: _myLocation,
+                    onPick: _addStop,
+                    onClose: () => setState(() => _stopPanelOpen = false),
+                  ),
                 ],
               ],
             ),
