@@ -167,6 +167,43 @@ IconData _maneuverIcon(String type, String? modifier) {
   return Icons.navigation;
 }
 
+class PoiCategory {
+  final String key;
+  final String label;
+  final IconData icon;
+  final Color color;
+  final List<String> filters;
+
+  const PoiCategory(this.key, this.label, this.icon, this.color, this.filters);
+}
+
+class Poi {
+  final String name;
+  final LatLng point;
+  final String key;
+
+  const Poi({required this.name, required this.point, required this.key});
+}
+
+const List<PoiCategory> kPoiCategories = [
+  PoiCategory('fuel', 'وقود', Icons.local_gas_station, Color(0xFFE65100),
+      ['["amenity"="fuel"]']),
+  PoiCategory('food', 'مطاعم', Icons.restaurant, Color(0xFFC62828),
+      ['["amenity"~"^(restaurant|fast_food|cafe)\$"]']),
+  PoiCategory('hotel', 'فنادق', Icons.hotel, Color(0xFF6A1B9A),
+      ['["tourism"~"^(hotel|motel|guest_house|hostel)\$"]']),
+  PoiCategory('parking', 'مواقف', Icons.local_parking, Color(0xFF1565C0),
+      ['["amenity"="parking"]']),
+  PoiCategory('market', 'أسواق', Icons.storefront, Color(0xFF2E7D32), [
+    '["shop"~"^(supermarket|mall|department_store|convenience)\$"]',
+    '["amenity"="marketplace"]',
+  ]),
+  PoiCategory('health', 'مستشفيات وصيدليات', Icons.local_hospital,
+      Color(0xFFAD1457), ['["amenity"~"^(hospital|clinic|pharmacy)\$"]']),
+  PoiCategory('tourism', 'سياحة', Icons.attractions, Color(0xFF00838F),
+      ['["tourism"~"^(attraction|museum|viewpoint|gallery)\$"]']),
+];
+
 class MapScreen extends StatefulWidget {
   const MapScreen({super.key});
 
@@ -198,6 +235,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   bool _locating = false;
 
   bool _searching = false;
+  String? _poiKey;
+  List<Poi> _pois = [];
+  bool _poiLoading = false;
   List<PlaceResult> _results = [];
   LatLng? _destination;
   String? _destinationName;
@@ -718,6 +758,188 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     } finally {
       if (mounted) setState(() => _searching = false);
     }
+  }
+
+  PoiCategory? _poiCategory(String key) {
+    for (final c in kPoiCategories) {
+      if (c.key == key) return c;
+    }
+    return null;
+  }
+
+  void _clearPois() {
+    setState(() {
+      _poiKey = null;
+      _pois = [];
+    });
+  }
+
+  Future<void> _loadPois(String key) async {
+    final cat = _poiCategory(key);
+    if (cat == null || _poiLoading) return;
+    final cam = _controller.camera;
+    if (cam.zoom < 14) {
+      _msg('قرّب الخريطة أكثر (مستوى 14 فما فوق) لعرض الأماكن.');
+      return;
+    }
+    final b = cam.visibleBounds;
+    final box = '${b.south},${b.west},${b.north},${b.east}';
+    final parts = cat.filters.map((f) => 'nwr$f($box);').join();
+    final query = '[out:json][timeout:20];($parts);out center 80;';
+    setState(() {
+      _poiKey = key;
+      _pois = [];
+      _poiLoading = true;
+    });
+    try {
+      final response = await http.post(
+        Uri.parse('https://overpass-api.de/api/interpreter'),
+        headers: {'User-Agent': 'Dalilik/0.1 (Flutter navigation app)'},
+        body: {'data': query},
+      ).timeout(const Duration(seconds: 25));
+      if (response.statusCode != 200) {
+        _msg('تعذّر تحميل الأماكن الآن (رمز ${response.statusCode}). حاول بعد قليل.');
+        return;
+      }
+      final data =
+          jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
+      final elements = (data['elements'] as List<dynamic>?) ?? [];
+      final list = <Poi>[];
+      for (final e in elements) {
+        final m = e as Map<String, dynamic>;
+        double? lat = (m['lat'] as num?)?.toDouble();
+        double? lon = (m['lon'] as num?)?.toDouble();
+        final center = m['center'] as Map<String, dynamic>?;
+        if (lat == null && center != null) {
+          lat = (center['lat'] as num?)?.toDouble();
+          lon = (center['lon'] as num?)?.toDouble();
+        }
+        if (lat == null || lon == null) continue;
+        final tags = (m['tags'] as Map<String, dynamic>?) ?? {};
+        final rawName = (tags['name:ar'] ?? tags['name'] ?? '').toString();
+        list.add(Poi(
+          name: rawName.isNotEmpty ? rawName : cat.label,
+          point: LatLng(lat, lon),
+          key: key,
+        ));
+      }
+      if (!mounted) return;
+      setState(() => _pois = list);
+      if (list.isEmpty) {
+        _msg('لا توجد أماكن من هذا النوع مسجّلة في هذه المنطقة.');
+      }
+    } catch (_) {
+      _msg('تعذّر تحميل الأماكن. تأكد من الاتصال بالإنترنت وحاول مرة أخرى.');
+    } finally {
+      if (mounted) setState(() => _poiLoading = false);
+    }
+  }
+
+  void _showPoi(Poi p) {
+    final cat = _poiCategory(p.key);
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(cat?.icon ?? Icons.place, color: cat?.color),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      p.name,
+                      style: Theme.of(ctx).textTheme.titleMedium,
+                    ),
+                  ),
+                ],
+              ),
+              if (cat != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(cat.label),
+                ),
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  onPressed: _navigating
+                      ? null
+                      : () {
+                          Navigator.pop(ctx);
+                          _selectPlace(
+                              PlaceResult(name: p.name, point: p.point));
+                        },
+                  icon: const Icon(Icons.directions),
+                  label: const Text('اجعله وجهتي'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _poiMarker(Poi p) {
+    final c = _poiCategory(p.key);
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        shape: BoxShape.circle,
+        border: Border.all(color: c?.color ?? Colors.grey, width: 2),
+        boxShadow: const [BoxShadow(blurRadius: 3, color: Colors.black38)],
+      ),
+      child: Icon(c?.icon ?? Icons.place, color: c?.color, size: 22),
+    );
+  }
+
+  Widget _poiChips() {
+    final scheme = Theme.of(context).colorScheme;
+    return SizedBox(
+      height: 42,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        children: [
+          if (_poiKey != null)
+            Padding(
+              padding: const EdgeInsetsDirectional.only(end: 6),
+              child: ActionChip(
+                avatar: const Icon(Icons.close, size: 18),
+                label: const Text('إخفاء'),
+                backgroundColor: scheme.surface,
+                onPressed: _clearPois,
+              ),
+            ),
+          for (final c in kPoiCategories)
+            Padding(
+              padding: const EdgeInsetsDirectional.only(end: 6),
+              child: ChoiceChip(
+                avatar: Icon(c.icon, size: 18, color: c.color),
+                label: Text(c.label),
+                showCheckmark: false,
+                selected: _poiKey == c.key,
+                backgroundColor: scheme.surface,
+                selectedColor: scheme.primaryContainer,
+                onSelected: (_) => _loadPois(c.key),
+              ),
+            ),
+          if (_poiLoading)
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+              child: SizedBox(
+                width: 24,
+                height: 24,
+                child: CircularProgressIndicator(strokeWidth: 3),
+              ),
+            ),
+        ],
+      ),
+    );
   }
 
   void _selectPlace(PlaceResult place) {
@@ -1369,6 +1591,22 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                     ),
                   ],
                 ),
+              if (_pois.isNotEmpty)
+                MarkerLayer(
+                  rotate: true,
+                  markers: [
+                    for (final p in _pois)
+                      Marker(
+                        point: p.point,
+                        width: 40,
+                        height: 40,
+                        child: GestureDetector(
+                          onTap: () => _showPoi(p),
+                          child: _poiMarker(p),
+                        ),
+                      ),
+                  ],
+                ),
               if (_destination != null)
                 MarkerLayer(
                   rotate: true,
@@ -1437,6 +1675,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                   _navigationCard()
                 else ...[
                   _searchBar(),
+                  if (_results.isEmpty && !_showHistory) ...[
+                    const SizedBox(height: 8),
+                    _poiChips(),
+                  ],
                   if (_results.isNotEmpty) ...[
                     const SizedBox(height: 8),
                     _resultsList(),
