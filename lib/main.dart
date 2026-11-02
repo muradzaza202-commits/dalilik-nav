@@ -85,13 +85,56 @@ class RouteOption {
   final List<NavStep> steps;
   final double distance;
   final double duration;
+  final List<int?> limits;
+  final List<String> congestion;
 
   const RouteOption({
     required this.points,
     required this.steps,
     required this.distance,
     required this.duration,
+    this.limits = const [],
+    this.congestion = const [],
   });
+}
+
+// مفتاح Mapbox العام (يبدأ بـ pk.). إن كان فارغاً يعمل التطبيق بخادم OSRM كالسابق.
+const String kMapboxToken =
+    String.fromEnvironment('MAPBOX_TOKEN', defaultValue: '');
+
+Future<String?> reverseArea(LatLng p) async {
+  try {
+    final response = await http.get(
+      Uri.https('nominatim.openstreetmap.org', '/reverse', {
+        'lat': '${p.latitude}',
+        'lon': '${p.longitude}',
+        'zoom': '15',
+        'format': 'jsonv2',
+        'accept-language': 'ar',
+      }),
+      headers: {'User-Agent': 'Dalilik/0.1 (Flutter navigation app)'},
+    ).timeout(const Duration(seconds: 10));
+    if (response.statusCode != 200) return null;
+    final data = jsonDecode(utf8.decode(response.bodyBytes));
+    if (data is! Map<String, dynamic>) return null;
+    final addr = data['address'];
+    if (addr is! Map<String, dynamic>) return null;
+    for (final k in [
+      'neighbourhood',
+      'suburb',
+      'quarter',
+      'city_district',
+      'town',
+      'village',
+      'city',
+    ]) {
+      final v = addr[k];
+      if (v is String && v.isNotEmpty) return v;
+    }
+    return null;
+  } catch (_) {
+    return null;
+  }
 }
 
 String _arabicInstruction(
@@ -354,6 +397,78 @@ Future<List<RawPlace>> fetchPlaces(
     return parseOverpassPlaces(await overpassElements(overpassQuery), cat);
   } on OverpassException {
     return nominatimPlaces(cat, south, west, north, east);
+  }
+}
+
+class ReportType {
+  final String key;
+  final String label;
+  final String spoken;
+  final IconData icon;
+  final Color color;
+  final int ttlMinutes;
+
+  const ReportType(
+    this.key,
+    this.label,
+    this.spoken,
+    this.icon,
+    this.color,
+    this.ttlMinutes,
+  );
+}
+
+const List<ReportType> kReportTypes = [
+  ReportType('cam_fixed', 'كاميرا سرعة ثابتة', 'كاميرا سرعة ثابتة',
+      Icons.photo_camera, Color(0xFFD81B60), 0),
+  ReportType('cam_mobile', 'كاميرا سرعة متنقلة', 'كاميرا سرعة متنقلة',
+      Icons.videocam, Color(0xFF8E24AA), 360),
+  ReportType('police', 'نقطة تفتيش أو شرطة', 'نقطة تفتيش أو شرطة',
+      Icons.local_police, Color(0xFF3949AB), 240),
+  ReportType('accident', 'حادث', 'حادث', Icons.report_problem,
+      Color(0xFFE53935), 180),
+  ReportType('closure', 'إغلاق طريق', 'إغلاق في الطريق', Icons.block,
+      Color(0xFF424242), 360),
+  ReportType('hazard', 'خطر على الطريق', 'خطر على الطريق', Icons.warning_amber,
+      Color(0xFFEF6C00), 240),
+  ReportType('jam', 'ازدحام', 'ازدحام', Icons.traffic, Color(0xFFFFA000), 90),
+];
+
+class RoadReport {
+  final String id;
+  final String type;
+  final LatLng point;
+  final int createdMs;
+
+  const RoadReport({
+    required this.id,
+    required this.type,
+    required this.point,
+    required this.createdMs,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'type': type,
+        'lat': point.latitude,
+        'lon': point.longitude,
+        'ts': createdMs,
+      };
+
+  static RoadReport? fromJson(Map<String, dynamic> j) {
+    final id = j['id'];
+    final type = j['type'];
+    final lat = j['lat'];
+    final lon = j['lon'];
+    final ts = j['ts'];
+    if (id is! String || type is! String) return null;
+    if (lat is! num || lon is! num || ts is! num) return null;
+    return RoadReport(
+      id: id,
+      type: type,
+      point: LatLng(lat.toDouble(), lon.toDouble()),
+      createdMs: ts.toInt(),
+    );
   }
 }
 
@@ -785,6 +900,17 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   bool _searching = false;
   List<PlaceResult> _stops = [];
   bool _stopPanelOpen = false;
+  List<RoadReport> _reports = [];
+  final Set<String> _warnedReports = {};
+  List<int?> _limits = [];
+  List<String> _congestion = [];
+  int? _speedLimit;
+  List<String> _routeAreas = [];
+  int _areasToken = 0;
+  String? _currentArea;
+  DateTime? _lastAreaTime;
+  LatLng? _lastAreaPos;
+  bool _areaBusy = false;
   final Map<String, int> _stopColorMap = {};
   int _stopSeed = 0;
   String? _poiKey;
@@ -828,6 +954,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     });
     WidgetsBinding.instance.addObserver(this);
     _loadHistory();
+    _loadReports();
     _restoreState();
   }
 
@@ -1019,6 +1146,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
 
   void _applyOption(RouteOption o) {
     _routePoints = o.points;
+    _limits = o.limits;
+    _congestion = o.congestion;
+    _speedLimit = null;
     _steps = o.steps;
     _distanceMeters = o.distance;
     _durationSeconds = o.duration;
@@ -1036,6 +1166,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       _selected = i;
       _applyOption(_options[i]);
     });
+    _loadRouteAreas();
   }
 
   String _optionLabel(int i, int fastest) {
@@ -1273,6 +1404,191 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       await _reroute(announce: false);
     } else {
       await _computeRoute(silent: true);
+    }
+  }
+
+  ReportType? _reportType(String key) {
+    for (final t in kReportTypes) {
+      if (t.key == key) return t;
+    }
+    return null;
+  }
+
+  bool _reportActive(RoadReport r) {
+    final t = _reportType(r.type);
+    if (t == null) return false;
+    if (t.ttlMinutes == 0) return true;
+    final age = DateTime.now().millisecondsSinceEpoch - r.createdMs;
+    return age < t.ttlMinutes * 60000;
+  }
+
+  Future<void> _loadReports() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString('dalilik_reports');
+      if (raw == null) return;
+      final list = <RoadReport>[];
+      for (final e in jsonDecode(raw) as List<dynamic>) {
+        final r = RoadReport.fromJson(e as Map<String, dynamic>);
+        if (r != null && _reportActive(r)) list.add(r);
+      }
+      if (mounted) setState(() => _reports = list);
+    } catch (_) {}
+  }
+
+  Future<void> _saveReports() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        'dalilik_reports',
+        jsonEncode(_reports.map((r) => r.toJson()).toList()),
+      );
+    } catch (_) {}
+  }
+
+  void _addReport(String type) {
+    final here = _myLocation;
+    if (here == null) {
+      _msg('لم يتحدد موقعك بعد.');
+      return;
+    }
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final r = RoadReport(id: '$now', type: type, point: here, createdMs: now);
+    setState(() => _reports = [..._reports, r]);
+    _saveReports();
+    _msg('تم حفظ البلاغ في موقعك (يظهر على هاتفك فقط).');
+  }
+
+  void _removeReport(RoadReport r) {
+    setState(() => _reports = _reports.where((x) => x.id != r.id).toList());
+    _warnedReports.remove(r.id);
+    _saveReports();
+  }
+
+  void _openReportSheet() {
+    if (_myLocation == null) {
+      _msg('لم يتحدد موقعك بعد.');
+      return;
+    }
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                'إبلاغ عن الطريق في موقعك الحالي',
+                style: Theme.of(ctx).textTheme.titleSmall,
+              ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (final t in kReportTypes)
+                    ActionChip(
+                      avatar: Icon(t.icon, size: 18, color: t.color),
+                      label: Text(t.label),
+                      onPressed: () {
+                        Navigator.pop(ctx);
+                        _addReport(t.key);
+                      },
+                    ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showReport(RoadReport r) {
+    final t = _reportType(r.type);
+    final mins =
+        (DateTime.now().millisecondsSinceEpoch - r.createdMs) ~/ 60000;
+    final ageText = mins < 1
+        ? 'الآن'
+        : mins < 60
+            ? 'قبل $mins دقيقة'
+            : 'قبل ${mins ~/ 60} ساعة';
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(
+                children: [
+                  Icon(t?.icon ?? Icons.report, color: t?.color),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      t?.label ?? 'بلاغ',
+                      style: Theme.of(ctx).textTheme.titleMedium,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Text(t != null && t.ttlMinutes == 0
+                  ? 'بلاغ دائم • $ageText'
+                  : 'بلاغ مؤقت • $ageText'),
+              const SizedBox(height: 12),
+              OutlinedButton.icon(
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  _removeReport(r);
+                },
+                icon: const Icon(Icons.delete_outline),
+                label: const Text('حذف البلاغ (لم يعد موجوداً)'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _reportMarker(RoadReport r) {
+    final t = _reportType(r.type);
+    return Container(
+      decoration: BoxDecoration(
+        color: t?.color ?? Colors.grey,
+        shape: BoxShape.circle,
+        border: Border.all(color: Colors.white, width: 2),
+        boxShadow: const [BoxShadow(blurRadius: 3, color: Colors.black38)],
+      ),
+      child: Icon(t?.icon ?? Icons.report, color: Colors.white, size: 18),
+    );
+  }
+
+  void _checkReportWarnings(LatLng here) {
+    if (_reports.isEmpty) return;
+    const dist = Distance();
+    for (final r in _reports) {
+      if (!_reportActive(r)) continue;
+      final d = dist.as(LengthUnit.Meter, here, r.point);
+      if (d > 700) {
+        _warnedReports.remove(r.id);
+        continue;
+      }
+      if (d > 400 || _warnedReports.contains(r.id)) continue;
+      if (_hasHeading) {
+        final b = dist.bearing(here, r.point);
+        final diff = ((b - _heading + 540) % 360) - 180;
+        if (diff.abs() > 60) continue;
+      }
+      _warnedReports.add(r.id);
+      final t = _reportType(r.type);
+      final what = t == null ? 'بلاغ' : t.spoken;
+      _speak('تنبيه، $what أمامك بعد ${_spokenDistance(d)}');
     }
   }
 
@@ -1645,9 +1961,32 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
     }).toList();
 
     final steps = <NavStep>[];
+    final limits = <int?>[];
+    final congestion = <String>[];
     final legs = (route['legs'] as List<dynamic>?) ?? [];
     for (var li = 0; li < legs.length; li++) {
       final leg = legs[li];
+      final ann = (leg as Map<String, dynamic>)['annotation'];
+      if (ann is Map<String, dynamic>) {
+        final ms = ann['maxspeed'];
+        if (ms is List) {
+          for (final m in ms) {
+            int? v;
+            if (m is Map && m['speed'] is num) {
+              var sp = (m['speed'] as num).toDouble();
+              if (m['unit'] == 'mph') sp *= 1.60934;
+              v = sp.round();
+            }
+            limits.add(v);
+          }
+        }
+        final cg = ann['congestion'];
+        if (cg is List) {
+          for (final c in cg) {
+            congestion.add(c.toString());
+          }
+        }
+      }
       final legSteps =
           ((leg as Map<String, dynamic>)['steps'] as List<dynamic>?) ?? [];
       for (final s in legSteps) {
@@ -1676,12 +2015,160 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       }
     }
 
+    final segs = points.length - 1;
     return RouteOption(
       points: points,
       steps: steps,
       distance: (route['distance'] as num).toDouble(),
       duration: (route['duration'] as num).toDouble(),
+      limits: limits.length == segs ? limits : const [],
+      congestion: congestion.length == segs ? congestion : const [],
     );
+  }
+
+  Future<List<RouteOption>> _requestMapbox(List<LatLng> allPoints) async {
+    if (kMapboxToken.isEmpty) return [];
+    try {
+      final coordPath =
+          allPoints.map((pt) => '${pt.longitude},${pt.latitude}').join(';');
+      final profile = allPoints.length <= 3 ? 'driving-traffic' : 'driving';
+      final uri = Uri.https(
+        'api.mapbox.com',
+        '/directions/v5/mapbox/$profile/$coordPath',
+        {
+          'alternatives': _stops.isEmpty ? 'true' : 'false',
+          'geometries': 'geojson',
+          'overview': 'full',
+          'steps': 'true',
+          'annotations': 'maxspeed,congestion',
+          'language': 'ar',
+          'access_token': kMapboxToken,
+        },
+      );
+      final response = await http.get(uri).timeout(const Duration(seconds: 15));
+      if (response.statusCode != 200) return [];
+      final data =
+          jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
+      final routes = data['routes'] as List<dynamic>?;
+      if (routes == null || routes.isEmpty) return [];
+      return routes
+          .map((r) => _parseRoute(r as Map<String, dynamic>))
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<void> _loadRouteAreas() async {
+    final pts = _routePoints;
+    if (pts.length < 2) return;
+    final token = ++_areasToken;
+    setState(() => _routeAreas = []);
+    const dist = Distance();
+    var total = 0.0;
+    for (var i = 1; i < pts.length; i++) {
+      total += dist.as(LengthUnit.Meter, pts[i - 1], pts[i]);
+    }
+    final spacing = total / 6 < 2500 ? 2500.0 : total / 6;
+    final samples = <LatLng>[pts.first];
+    var acc = 0.0;
+    for (var i = 1; i < pts.length && samples.length < 7; i++) {
+      acc += dist.as(LengthUnit.Meter, pts[i - 1], pts[i]);
+      if (acc >= spacing) {
+        samples.add(pts[i]);
+        acc = 0;
+      }
+    }
+    if (samples.length < 8 && samples.last != pts.last) samples.add(pts.last);
+    final names = <String>[];
+    for (var i = 0; i < samples.length; i++) {
+      if (i > 0) await Future.delayed(const Duration(milliseconds: 1100));
+      if (!mounted || token != _areasToken) return;
+      final n = await reverseArea(samples[i]);
+      if (!mounted || token != _areasToken) return;
+      if (n != null && (names.isEmpty || names.last != n)) {
+        names.add(n);
+        setState(() => _routeAreas = List<String>.of(names));
+      }
+    }
+  }
+
+  Future<void> _maybeUpdateArea(LatLng here) async {
+    if (_areaBusy) return;
+    final now = DateTime.now();
+    final lastT = _lastAreaTime;
+    final lastP = _lastAreaPos;
+    if (lastT != null && lastP != null) {
+      final moved = const Distance().as(LengthUnit.Meter, lastP, here);
+      if (now.difference(lastT).inSeconds < 20 || moved < 400) return;
+    }
+    _areaBusy = true;
+    _lastAreaTime = now;
+    _lastAreaPos = here;
+    final n = await reverseArea(here);
+    _areaBusy = false;
+    if (n != null && mounted && _navigating) {
+      setState(() => _currentArea = n);
+    }
+  }
+
+  void _updateSpeedLimit(LatLng here) {
+    if (_limits.isEmpty || _routePoints.length < 2) {
+      _speedLimit = null;
+      return;
+    }
+    var best = double.infinity;
+    var idx = 0;
+    for (var i = 0; i < _routePoints.length; i++) {
+      final dx = _routePoints[i].latitude - here.latitude;
+      final dy = _routePoints[i].longitude - here.longitude;
+      final d = dx * dx + dy * dy;
+      if (d < best) {
+        best = d;
+        idx = i;
+      }
+    }
+    final seg = idx < _limits.length ? idx : _limits.length - 1;
+    _speedLimit = _limits[seg];
+  }
+
+  List<Polyline> _congestionPolylines() {
+    final c = _congestion;
+    final pts = _routePoints;
+    if (c.isEmpty || c.length != pts.length - 1) return <Polyline>[];
+    Color? colorFor(String level) {
+      switch (level) {
+        case 'moderate':
+          return const Color(0xFFFFA000);
+        case 'heavy':
+          return const Color(0xFFE53935);
+        case 'severe':
+          return const Color(0xFF8E0000);
+        default:
+          return null;
+      }
+    }
+
+    final out = <Polyline>[];
+    var i = 0;
+    while (i < c.length) {
+      final col = colorFor(c[i]);
+      if (col == null) {
+        i++;
+        continue;
+      }
+      var j = i;
+      while (j + 1 < c.length && c[j + 1] == c[i]) {
+        j++;
+      }
+      out.add(Polyline(
+        points: pts.sublist(i, j + 2),
+        strokeWidth: 6,
+        color: col,
+      ));
+      i = j + 1;
+    }
+    return out;
   }
 
   Future<void> _computeRoute({bool silent = false}) async {
@@ -1704,6 +2191,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       final allPoints = <LatLng>[from, ..._stops.map((st) => st.point), to];
       final coordPath =
           allPoints.map((pt) => '${pt.longitude},${pt.latitude}').join(';');
+      var options = await _requestMapbox(allPoints);
+      if (options.isEmpty) {
       final uri = Uri.https(
         'router.project-osrm.org',
         '/route/v1/driving/$coordPath',
@@ -1731,9 +2220,10 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         return;
       }
 
-      final options = <RouteOption>[];
+      options = <RouteOption>[];
       for (final r in routes) {
         options.add(_parseRoute(r as Map<String, dynamic>));
+      }
       }
 
       if (!mounted) return;
@@ -1742,6 +2232,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         _selected = 0;
         _applyOption(options[0]);
       });
+      if (!_navigating) _loadRouteAreas();
 
       if (!silent && _routePoints.length > 1) {
         _controller.fitCamera(
@@ -1788,6 +2279,8 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       _offRouteCount = 0;
       _heading = 0;
       _hasHeading = false;
+      _currentArea = null;
+      _lastAreaTime = null;
       final here = _myLocation;
       if (here != null) {
         _updateProgress(here);
@@ -1823,6 +2316,9 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
         _maybeSpeak();
         _checkOffRoute(here, position.accuracy);
         _checkStopReached(here);
+        _updateSpeedLimit(here);
+        _checkReportWarnings(here);
+        _maybeUpdateArea(here);
         final h = position.heading;
         if (speed >= 1.5 && !h.isNaN && h >= 0 && h <= 360) {
           if (!_hasHeading) {
@@ -1997,6 +2493,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
   Widget _destinationCard() {
     final scheme = Theme.of(context).colorScheme;
     final hasRoute = _distanceMeters != null && _durationSeconds != null;
+    final areasText = _routeAreas.join(' ← ');
     var fastest = 0;
     for (var i = 1; i < _options.length; i++) {
       if (_options[i].duration < _options[fastest].duration) fastest = i;
@@ -2031,6 +2528,24 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                     child: Text(
                       '${_formatDistance(_distanceMeters!)}  •  ${_formatDuration(_durationSeconds!)}',
                       style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          if (_routeAreas.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+              child: Row(
+                children: [
+                  const Icon(Icons.place_outlined, size: 18),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'عبر: $areasText',
+                      style: Theme.of(context).textTheme.bodySmall,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
                     ),
                   ),
                 ],
@@ -2100,7 +2615,12 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
       remainingMeters += _steps[i].distance;
       remainingSeconds += _steps[i].duration;
     }
-    final speedText = speed == null ? '-- كم/س' : '${speed.round()} كم/س';
+    final limit = _speedLimit;
+    final over = speed != null && limit != null && speed > limit + 5;
+    final speedText =
+        (speed == null ? '-- كم/س' : '${speed.round()} كم/س') +
+            (limit != null ? ' (الحد $limit)' : '');
+    final areaText = _currentArea == null ? '' : '$_currentArea • ';
 
     return Align(
       alignment: Alignment.topLeft,
@@ -2179,8 +2699,13 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                   fit: BoxFit.scaleDown,
                   alignment: AlignmentDirectional.centerStart,
                   child: Text(
-                    '${_formatDistance(remainingMeters)} • ${_formatDuration(remainingSeconds)} • $speedText',
-                    style: const TextStyle(fontSize: 14, height: 1.2),
+                    '$areaText${_formatDistance(remainingMeters)} • ${_formatDuration(remainingSeconds)} • $speedText',
+                    style: TextStyle(
+                      fontSize: 14,
+                      height: 1.2,
+                      color: over ? Colors.red : null,
+                      fontWeight: over ? FontWeight.bold : null,
+                    ),
                     maxLines: 1,
                   ),
                 ),
@@ -2236,6 +2761,7 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                       borderStrokeWidth: 2,
                       borderColor: Colors.white,
                     ),
+                    ..._congestionPolylines(),
                   ],
                 ),
               if (_myLocation != null)
@@ -2257,6 +2783,23 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                         ),
                       ),
                     ),
+                  ],
+                ),
+              if (_reports.isNotEmpty)
+                MarkerLayer(
+                  rotate: true,
+                  markers: [
+                    for (final r in _reports)
+                      if (_reportActive(r))
+                        Marker(
+                          point: r.point,
+                          width: 34,
+                          height: 34,
+                          child: GestureDetector(
+                            onTap: () => _showReport(r),
+                            child: _reportMarker(r),
+                          ),
+                        ),
                   ],
                 ),
               if (_stops.isNotEmpty)
@@ -2333,6 +2876,16 @@ class _MapScreenState extends State<MapScreen> with WidgetsBindingObserver {
                   child: const Icon(Icons.remove),
                 ),
               ],
+            ),
+          ),
+          Positioned(
+            right: 16,
+            bottom: (_destination != null && _routePoints.length > 1) ? 192 : 136,
+            child: FloatingActionButton.small(
+              heroTag: 'report',
+              tooltip: 'إبلاغ عن الطريق',
+              onPressed: _openReportSheet,
+              child: const Icon(Icons.campaign),
             ),
           ),
           if (_destination != null && _routePoints.length > 1)
